@@ -1,16 +1,18 @@
-use serde::{Serialize, Deserialize};
-use serde::de::DeserializeOwned;
-use std::net::TcpStream;
-use std::io::{Write, Read};
 use mio::net as mnet;
-use mio::{Events, Poll, Interest, Token, Registry};
+use mio::{Interest, Registry, Token};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 
 /// Allows setting keepalive on the underlying socket.
-pub fn set_keepalive<T>(stream: &T, keepalive: bool) -> std::io::Result<()> where T: std::os::fd::AsRawFd {
+pub fn set_keepalive<T>(stream: &T, keepalive: bool) -> std::io::Result<()>
+where
+    T: std::os::fd::AsRawFd,
+{
     // you were supposed to better than this rust.
-    use socket2::{Socket, TcpKeepalive, Domain, Type};
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use socket2::Socket;
+    use std::os::fd::FromRawFd;
 
     let fd = stream.as_raw_fd();
     let dup_fd = unsafe { libc::dup(fd) };
@@ -26,7 +28,7 @@ pub struct NetBuf {
 
 impl NetBuf {
     pub fn new(stream: mnet::TcpStream) -> NetBuf {
-        NetBuf {stream}
+        NetBuf { stream }
     }
 
     pub fn stream(&self) -> &mnet::TcpStream {
@@ -34,31 +36,42 @@ impl NetBuf {
     }
 
     /// encode and write T to internal stream
-    pub fn write<T>(&mut self, val: &T) -> Result<()> where T: Serialize {
-        use std::io::ErrorKind;
-        use rmp_serde::encode::Error as EnError;
+    pub fn write<T>(&mut self, val: &T) -> Result<()>
+    where
+        T: Serialize,
+    {
         use rmp::encode::ValueWriteError as VWE;
+        use rmp_serde::encode::Error as EnError;
+        use std::io::ErrorKind;
 
         match rmp_serde::encode::write(&mut self.stream, val) {
             // TODO ugly
-            Err(EnError::InvalidValueWrite(VWE::InvalidMarkerWrite(e))) | Err(EnError::InvalidValueWrite(VWE::InvalidDataWrite(e))) if e.kind() == ErrorKind::WouldBlock => {
+            Err(EnError::InvalidValueWrite(VWE::InvalidMarkerWrite(e)))
+            | Err(EnError::InvalidValueWrite(VWE::InvalidDataWrite(e)))
+                if e.kind() == ErrorKind::WouldBlock =>
+            {
                 Err(Error::WouldBlock)
             }
             Err(e) => Err(Error::MsgPackEncode(e)),
-            Ok(_) => Ok(())
+            Ok(_) => Ok(()),
         }
     }
     /// decode and read T from internal stream
-    pub fn read<T>(&mut self) -> Result<T> where T: DeserializeOwned {
-        use std::io::ErrorKind;
+    pub fn read<T>(&mut self) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
         use rmp_serde::decode::Error as DeError;
+        use std::io::ErrorKind;
 
         match rmp_serde::decode::from_read(&mut self.stream) {
-            Err(DeError::InvalidMarkerRead(e)) | Err(DeError::InvalidDataRead(e)) if e.kind() == ErrorKind::WouldBlock => {
+            Err(DeError::InvalidMarkerRead(e)) | Err(DeError::InvalidDataRead(e))
+                if e.kind() == ErrorKind::WouldBlock =>
+            {
                 Err(Error::WouldBlock)
             }
             Err(e) => Err(Error::MsgPackDecode(e)),
-            Ok(x) => Ok(x)
+            Ok(x) => Ok(x),
         }
     }
 
@@ -86,16 +99,22 @@ impl Read for NetBuf {
     }
 }
 
-impl mio::event::Source for NetBuf{
-    fn register(&mut self, registry: &Registry, token: Token, interests: Interest)
-        -> std::io::Result<()>
-    {
+impl mio::event::Source for NetBuf {
+    fn register(
+        &mut self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> std::io::Result<()> {
         self.stream.register(registry, token, interests)
     }
 
-    fn reregister(&mut self, registry: &Registry, token: Token, interests: Interest)
-        -> std::io::Result<()>
-    {
+    fn reregister(
+        &mut self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> std::io::Result<()> {
         self.stream.reregister(registry, token, interests)
     }
 
@@ -121,7 +140,7 @@ pub struct Auth {
 
 impl Auth {
     pub fn new(psk: String) -> Auth {
-        Auth{
+        Auth {
             psk: crate::LimitedString::<512>(psk),
         }
     }
@@ -129,8 +148,7 @@ impl Auth {
 
 #[derive(Debug, Deserialize, Serialize)]
 /// Message sent when a client is shutting down
-pub struct Kthxbai {
-}
+pub struct Kthxbai {}
 
 #[derive(Debug)]
 pub enum Error {
@@ -159,7 +177,7 @@ impl std::error::Error for Error {
             Error::Io(e) => Some(e),
             Error::MsgPackDecode(e) => Some(e),
             Error::MsgPackEncode(e) => Some(e),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -189,6 +207,12 @@ pub struct Tokens<T> {
     rolling: usize,
 }
 
+impl<T> std::default::Default for Tokens<T> {
+    fn default() -> Self {
+        Tokens::<T>::new()
+    }
+}
+
 impl<T> Tokens<T> {
     pub fn new() -> Tokens<T> {
         Tokens {
@@ -213,9 +237,8 @@ impl<T> Tokens<T> {
         }
         match self.tokens.insert(k, v) {
             None => Some(k),
-            Some(_) => unreachable!()
+            Some(_) => unreachable!(),
         }
-
     }
     pub fn remove(&mut self, k: usize) -> Option<T> {
         self.tokens.remove(&k)

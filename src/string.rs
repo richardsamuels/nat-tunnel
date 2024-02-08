@@ -1,8 +1,7 @@
 // from https://stackoverflow.com/a/74483246
-use std::ops::Deref;
 use serde::de;
 use serde::ser;
-use serde::{Deserialize, Serialize};
+use std::ops::Deref;
 
 #[derive(Debug)]
 pub struct LimitedString<const MAX_LENGTH: usize>(pub String);
@@ -21,7 +20,10 @@ impl<'de, const MAX_LENGTH: usize> de::Deserialize<'de> for LimitedString<MAX_LE
     {
         <String as de::Deserialize>::deserialize(deserializer).and_then(|inner| {
             if inner.len() > MAX_LENGTH {
-                Err(de::Error::invalid_length(inner.len(), &"an integer lower than the maximum"))
+                Err(de::Error::invalid_length(
+                    inner.len(),
+                    &"an integer lower than the maximum",
+                ))
             } else {
                 Ok(Self(inner))
             }
@@ -31,7 +33,9 @@ impl<'de, const MAX_LENGTH: usize> de::Deserialize<'de> for LimitedString<MAX_LE
 
 impl<const MAX_LENGTH: usize> ser::Serialize for LimitedString<MAX_LENGTH> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: ser::Serializer {
+    where
+        S: ser::Serializer,
+    {
         serializer.serialize_str(&self.0)
     }
 }

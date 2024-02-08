@@ -1,9 +1,9 @@
-use tracing::{info, error};
-use simple_tunnel::{config, remote};
-use std::process::ExitCode;
 use mio::net as mnet;
+use simple_tunnel::Result;
+use simple_tunnel::{config, remote};
 use std::net::SocketAddr;
-use simple_tunnel::{Result};
+use std::process::ExitCode;
+use tracing::{error, info};
 
 fn main2() -> Result<u8> {
     let c = config::load_server_config();
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
     ExitCode::from(match main2() {
         Ok(_) => 0,
         Err(e) => {
-            error!(cause=e, "Exiting");
+            error!(cause = e, "Exiting");
             1
         }
     })

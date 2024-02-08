@@ -1,15 +1,12 @@
-use tracing::{info, error};
-use std::str;
-use std::io::{Write, Read};
-//use crate::{config, Result, Error};
-use simple_tunnel::{config, net, Result, Error};
-use std::process::ExitCode;
 use mio::net as mnet;
-use mio::{Events, Poll, Interest, Token};
-use std::net::SocketAddr;
-use std::io::{BufRead, BufWriter};
+use mio::{Events, Interest, Poll, Token};
 use simple_tunnel::redirector;
+use simple_tunnel::{config, net, Result};
+use std::io::Write;
+use std::net::SocketAddr;
+use std::process::ExitCode;
 use std::sync::mpsc;
+use tracing::{error, info};
 
 struct Client {
     poll: mio::Poll,
@@ -26,9 +23,13 @@ impl Client {
         let mut c = Client {
             poll,
             events: Events::with_capacity(128),
-            transport: net::NetBuf::new(stream)
+            transport: net::NetBuf::new(stream),
         };
-        c.poll.registry().register(&mut c.transport, Token(0), Interest::READABLE | Interest::WRITABLE)?;
+        c.poll.registry().register(
+            &mut c.transport,
+            Token(0),
+            Interest::READABLE | Interest::WRITABLE,
+        )?;
         Ok(c)
     }
 
@@ -42,11 +43,11 @@ impl Client {
                         Err(err)
                             if err.kind() == std::io::ErrorKind::NotConnected
                                 || err.raw_os_error() == Some(libc::EINPROGRESS) =>
-                            {
-                                continue;
-                            }
+                        {
+                            continue;
+                        }
                         Err(e) => return Err(e.into()),
-                        Ok(_) => ()
+                        Ok(_) => (),
                     };
 
                     let auth = net::Auth::new(c.psk.clone());
@@ -66,14 +67,11 @@ impl Client {
     }
 
     fn run(&mut self, c: &config::ClientConfig, rx: &mpsc::Receiver<()>) -> Result<()> {
-        use std::io::ErrorKind;
-        use rmp_serde::decode::Error as DeError;
-
         loop {
             self.poll.poll(&mut self.events, None)?;
 
             for ev in &self.events {
-                if let Ok(_) = rx.try_recv() {
+                if rx.try_recv().is_ok() {
                     return Ok(());
                 }
                 if ev.token() == Token(0) && ev.is_readable() {
@@ -84,7 +82,8 @@ impl Client {
                             Err(_e) => return Err("connection dead".into()),
                         };
 
-                        let from_addr: SocketAddr = format!("{}:{}", &c.addr, &pd.via_port).parse().unwrap();
+                        let from_addr: SocketAddr =
+                            format!("{}:{}", &c.addr, &pd.via_port).parse().unwrap();
                         let local_port: u16 = {
                             let mut out = 0;
                             for t in &c.tunnels {
@@ -95,20 +94,21 @@ impl Client {
                             }
                             out
                         };
-                        let to_addr: SocketAddr = format!("127.0.0.1:{}", local_port).parse().unwrap();
+                        let to_addr: SocketAddr =
+                            format!("127.0.0.1:{}", local_port).parse().unwrap();
                         info!(dial = ?pd, local_port = local_port, from = ?from_addr, to = ?to_addr, "Received dial request");
                         let from_stream = match std::net::TcpStream::connect(from_addr) {
                             Ok(s) => s,
                             Err(e) => {
                                 error!(cause = ?e, from = ?from_addr, "Failed to connect to remote");
-                                continue
+                                continue;
                             }
                         };
                         let to_stream = match std::net::TcpStream::connect(to_addr) {
                             Ok(s) => s,
                             Err(e) => {
                                 error!(cause = ?e, to = ?to_addr, "Failed to connect to b");
-                                continue
+                                continue;
                             }
                         };
                         from_stream.set_nonblocking(true)?;
@@ -132,12 +132,11 @@ impl Client {
 
 impl std::ops::Drop for Client {
     fn drop(&mut self) {
-        let bai = simple_tunnel::net::Kthxbai{};
+        let bai = simple_tunnel::net::Kthxbai {};
         let _ = self.transport.write(&bai);
         info!("Closing connection to remote");
     }
 }
-
 
 fn main2() -> Result<()> {
     let (sigint_tx, sigint_rx) = mpsc::channel();
@@ -153,9 +152,8 @@ fn main2() -> Result<()> {
         let stream = mnet::TcpStream::connect(addr)?;
         let mut client = Client::new(stream)?;
 
-        match client.push_tunnel_config(&c) {
-            Err(e) => panic!("connection to {} failed: {}", addr, e),
-            Ok(_) => ()
+        if let Err(e) = client.push_tunnel_config(&c) {
+            panic!("connection to {} failed: {}", addr, e);
         };
 
         match client.run(&c, &sigint_rx) {
@@ -174,14 +172,12 @@ fn main2() -> Result<()> {
     }
 }
 
-
-
 fn main() -> ExitCode {
     tracing_subscriber::fmt::init();
     ExitCode::from(match main2() {
         Ok(_) => 0,
         Err(e) => {
-            error!(cause=e, "Exiting");
+            error!(cause = e, "Exiting");
             1
         }
     })
