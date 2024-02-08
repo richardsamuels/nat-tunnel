@@ -22,9 +22,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: stc-${{ matrix.target }}
-          path: stc*.tgz
+          path: ./target/*/stc
+          if-no-files-found: error
       - name: Upload sts
         uses: actions/upload-artifact@v4
         with:
           name: sts-${{ matrix.target }}
-          path: sts*.tgz
+          path: ./target/*/sts
+          if-no-files-found: error
