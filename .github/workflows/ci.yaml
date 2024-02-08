@@ -19,12 +19,12 @@ jobs:
       - run: tar cf stc-${{ matrix.target }}.tgz -C ./target/release/ stc
       - run: tar cf sts-${{ matrix.target }}.tgz -C ./target/release/ sts
       - name: Upload stc
-        uses: actions/artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: stc-${{ matrix.target }}
           path: stc*.tgz
       - name: Upload sts
-        uses: actions/artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: sts-${{ matrix.target }}
           path: sts*.tgz
