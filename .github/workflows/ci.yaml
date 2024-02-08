@@ -16,6 +16,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
+      - run: ls target/**/**
       - run: tar cf stc-${{ matrix.target }}.tgz -C ./target/release/ stc
       - run: tar cf sts-${{ matrix.target }}.tgz -C ./target/release/ sts
       - name: Upload stc
