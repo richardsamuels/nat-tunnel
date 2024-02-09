@@ -2,6 +2,7 @@ pub mod config;
 
 pub mod client;
 pub mod remote;
+pub mod remote_async;
 
 pub mod net;
 

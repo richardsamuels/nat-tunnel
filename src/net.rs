@@ -4,6 +4,28 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use tokio_util::codec;
+use tokio::net as tnet;
+use std::vec::Vec;
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum Frame {
+    Auth(crate::LimitedString<512>),
+    Tunnels(Vec<u16>),
+    Dial(PlzDial),
+    Kthxbai,
+}
+
+pub type FramedLength = tokio_util::codec::Framed<tnet::TcpStream, codec::LengthDelimitedCodec>;
+pub type Framed = tokio_serde::Framed<FramedLength, Frame, Frame, tokio_serde::formats::MessagePack<Frame, Frame>>;
+
+pub fn frame(stream: tnet::TcpStream) -> Framed {
+    let len_codec = codec::LengthDelimitedCodec::new();
+    let len_delimited = codec::Framed::new(stream, len_codec);
+
+    let codec = tokio_serde::formats::MessagePack::default();
+    Framed::new(len_delimited, codec)
+}
 
 /// Allows setting keepalive on the underlying socket.
 pub fn set_keepalive<T>(stream: &T, keepalive: bool) -> std::io::Result<()>
@@ -40,18 +62,7 @@ impl NetBuf {
     where
         T: Serialize,
     {
-        use rmp::encode::ValueWriteError as VWE;
-        use rmp_serde::encode::Error as EnError;
-        use std::io::ErrorKind;
-
         match rmp_serde::encode::write(&mut self.stream, val) {
-            // TODO ugly
-            Err(EnError::InvalidValueWrite(VWE::InvalidMarkerWrite(e)))
-            | Err(EnError::InvalidValueWrite(VWE::InvalidDataWrite(e)))
-                if e.kind() == ErrorKind::WouldBlock =>
-            {
-                Err(Error::WouldBlock)
-            }
             Err(e) => Err(Error::MsgPackEncode(e)),
             Ok(_) => Ok(()),
         }
@@ -61,15 +72,7 @@ impl NetBuf {
     where
         T: DeserializeOwned,
     {
-        use rmp_serde::decode::Error as DeError;
-        use std::io::ErrorKind;
-
         match rmp_serde::decode::from_read(&mut self.stream) {
-            Err(DeError::InvalidMarkerRead(e)) | Err(DeError::InvalidDataRead(e))
-                if e.kind() == ErrorKind::WouldBlock =>
-            {
-                Err(Error::WouldBlock)
-            }
             Err(e) => Err(Error::MsgPackDecode(e)),
             Ok(x) => Ok(x),
         }
@@ -152,7 +155,7 @@ pub struct Kthxbai {}
 
 #[derive(Debug)]
 pub enum Error {
-    WouldBlock,
+    ConnectionDead,
     Io(std::io::Error),
     MsgPackDecode(rmp_serde::decode::Error),
     MsgPackEncode(rmp_serde::encode::Error),
@@ -166,7 +169,7 @@ impl std::fmt::Display for Error {
             Error::MsgPackEncode(e) => write!(f, "{}", e),
             Error::MsgPackDecode(e) => write!(f, "{}", e),
             Error::Other(s) => write!(f, "{}", s),
-            Error::WouldBlock => write!(f, "simple_tunnel::net::Error::WouldBlock"),
+            Error::ConnectionDead => write!(f, "simple_tunnel::net::Error::ConnectionDead"),
         }
     }
 }
@@ -190,11 +193,7 @@ impl std::convert::From<std::string::String> for Error {
 
 impl std::convert::From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
-        if value.kind() == std::io::ErrorKind::WouldBlock {
-            Error::WouldBlock
-        } else {
-            Error::Io(value)
-        }
+        Error::Io(value)
     }
 }
 

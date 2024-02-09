@@ -8,7 +8,7 @@ use tracing::{error, info};
 fn main2() -> Result<u8> {
     let c = config::load_server_config();
 
-    let addr: SocketAddr = format!("0.0.0.0:{}", c.port).parse().unwrap();
+    let addr: SocketAddr = format!("0.0.0.0:{}", &c.port).parse().unwrap();
     info!("Listening on {}", &addr);
     let listener = mnet::TcpListener::bind(addr)?;
 

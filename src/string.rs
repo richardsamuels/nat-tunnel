@@ -6,6 +6,12 @@ use std::ops::Deref;
 #[derive(Debug)]
 pub struct LimitedString<const MAX_LENGTH: usize>(pub String);
 
+impl<const MAX_LENGTH: usize> std::convert::From<String> for LimitedString<MAX_LENGTH> {
+    fn from(value: String) -> Self {
+        LimitedString(value)
+    }
+}
+
 impl<const MAX_LENGTH: usize> Deref for LimitedString<MAX_LENGTH> {
     type Target = String;
     fn deref(&self) -> &Self::Target {
