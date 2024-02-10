@@ -17,6 +17,17 @@ pub struct ClientConfig {
     pub tunnels: Vec<Tunnel>,
 }
 
+impl ClientConfig {
+    pub fn local_port(&self, remote_port: u16) -> Option<u16> {
+        for t in &self.tunnels {
+            if t.remote_port == remote_port {
+                return Some(t.local_port);
+            }
+        }
+        None
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ServerConfig {
     pub psk: String,

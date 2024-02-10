@@ -1,109 +1,84 @@
 use crate::Result;
-use mio::net as mnet;
-use mio::{Events, Interest, Poll, Token};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use tracing::error;
+use tokio::net as tnet;
 
-/// Fill buffer of `from` and write its contents to `to`
-fn read_write<T, U>(from: &mut BufReader<T>, to: &mut BufWriter<U>) -> std::io::Result<usize>
+pub struct RedirectorHandler {
+    left: tnet::TcpStream,
+    right: tnet::TcpStream,
+}
+
+impl RedirectorHandler {
+    pub fn new(left: tnet::TcpStream, right: tnet::TcpStream) -> Self {
+        RedirectorHandler { left, right }
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
+        use tokio::io::{BufWriter, BufReader};
+        error!("actual redirecting");
+
+        // Yield for writability on both sockets
+        //self.left.writable().await?;
+        //self.right.writable().await?;
+
+        let (left_r, left_w) = self.left.split();
+        let (right_r, right_w) = self.right.split();
+
+        // TODO 1500 is the default ethernet payload size, but MTU
+        // can vary so maybe parameterize this
+        let mut left_reader = BufReader::with_capacity(1500, left_r);
+        let mut left_writer = BufWriter::with_capacity(1500, left_w);
+        let mut right_reader = BufReader::with_capacity(1500, right_r);
+        let mut right_writer = BufWriter::with_capacity(1500, right_w);
+
+        loop {
+            tokio::select! {
+                lr = read_write(&mut left_reader, &mut right_writer) => {
+                    match lr {
+                        Err(e) => {
+                            error!(cause = ?e, "failed to redirect from left to right");
+                            continue
+                        },
+                        Ok(0) => break,
+                        Ok(_) => continue
+                    }
+                }
+                rl = read_write(&mut right_reader, &mut left_writer) => {
+                    match rl {
+                        Err(e) => {
+                            error!(cause = ?e, "failed to redirect from right to left");
+                            continue
+                        },
+                        Ok(0) => break,
+                        Ok(_) => continue
+                    }
+                }
+            };
+        }
+
+        Ok(())
+    }
+}
+
+async fn read_write<T, U>(from: &mut T, to: &mut U) -> std::io::Result<usize>
 where
-    T: Read,
-    U: Write,
+    T: tokio::io::AsyncReadExt + tokio::io::AsyncBufReadExt + std::marker::Unpin,
+    U: tokio::io::AsyncWriteExt + std::marker::Unpin,
 {
-    let buf = from.fill_buf()?;
+    let buf = from.fill_buf().await?;
     let len = buf.len();
     // len 0 indicates closed sockets
     if len != 0 {
-        match to.write(buf) {
+        match to.write(buf).await {
             Err(e) => {
                 error!(cause = ?e, "Failed to write");
                 return Err(e);
             }
             Ok(_) => {
                 from.consume(len);
-                to.flush()?;
+                to.flush().await?;
             }
         };
     }
     Ok(len)
 }
 
-/// Read all data from left stream and write it to the right stream and vice
-/// versa. Both streams should be connected
-pub fn redirector(
-    mut left_stream: mnet::TcpStream,
-    mut right_stream: mnet::TcpStream,
-) -> Result<()> {
-    use std::io::ErrorKind;
-
-    let mut poll = Poll::new()?;
-    poll.registry()
-        .register(&mut left_stream, Token(0), Interest::WRITABLE)?;
-    poll.registry()
-        .register(&mut right_stream, Token(1), Interest::WRITABLE)?;
-
-    // Yield for writability on both sockets
-    {
-        let mut writable = [0u8; 2];
-        let mut events = Events::with_capacity(2);
-        loop {
-            poll.poll(&mut events, None)?;
-
-            for ev in &events {
-                let token = ev.token();
-                writable[token.0] = 1;
-            }
-            if writable[0] == 1 && writable[1] == 1 {
-                break;
-            }
-        }
-    }
-
-    poll.registry()
-        .reregister(&mut left_stream, Token(0), Interest::READABLE)?;
-    poll.registry()
-        .reregister(&mut right_stream, Token(1), Interest::READABLE)?;
-    // TODO 1500 is the default ethernet payload size, but MTU
-    // can vary so parameterize this
-    let mut left_reader = BufReader::with_capacity(1500, &left_stream);
-    let mut left_writer = BufWriter::with_capacity(1500, &left_stream);
-
-    let mut right_reader = BufReader::with_capacity(1500, &right_stream);
-    let mut right_writer = BufWriter::with_capacity(1500, &right_stream);
-
-    let mut events = Events::with_capacity(128);
-    'outer: loop {
-        poll.poll(&mut events, None)?;
-        for ev in &events {
-            if ev.token() == Token(0) {
-                loop {
-                    match read_write(&mut left_reader, &mut right_writer) {
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                        Ok(0) => {
-                            break 'outer;
-                        }
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!(cause = ?e, "failed to redirect from left to right")
-                        }
-                    }
-                }
-            } else if ev.token() == Token(1) {
-                loop {
-                    match read_write(&mut right_reader, &mut left_writer) {
-                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-                        Ok(0) => {
-                            break 'outer;
-                        }
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!(cause = ?e, "failed to redirect from right to left")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
