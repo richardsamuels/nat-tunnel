@@ -1,45 +1,31 @@
-use crate::net;
-use crate::net::Frame;
-use crate::redirector;
-use crate::{config, net as stnet, Result};
-use futures::sink::Sink;
+use crate::tunnel::TunnelHandler;
+use crate::{config, net as stnet, net::Frame, Result};
 use futures::stream::FuturesUnordered;
 use futures::SinkExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
-use tokio_serde::Framed;
-use tokio_util::codec;
-use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
-use tracing::{error, info};
 use tokio::task::JoinSet;
+use tracing::{error, info};
 
-pub struct Client {
-    config: config::ClientConfig,
+pub struct Client<'a> {
+    config: &'a config::ClientConfig,
     transport: crate::net::Framed,
     to_bs: HashMap<SocketAddr, mpsc::Sender<stnet::Datagram>>,
     from_bs: HashMap<SocketAddr, mpsc::Receiver<stnet::Datagram>>,
 
-    handlers: JoinSet<Result<SocketAddr>>
+    handlers: JoinSet<Result<SocketAddr>>,
 }
 
-impl Client {
-    pub fn new(config: config::ClientConfig, stream: tnet::TcpStream) -> Result<Client> {
+impl<'a> Client<'a> {
+    pub fn new(config: &config::ClientConfig, stream: tnet::TcpStream) -> Result<Client> {
         stnet::set_keepalive(&stream, true)?;
-        let len_codec = LengthDelimitedCodec::new();
-        let len_delimited = codec::Framed::new(stream, len_codec);
-
-        let codec = tokio_serde::formats::MessagePack::default();
-        let transport = Framed::new(len_delimited, codec);
-
         let c = Client {
             config,
-            transport,
+            transport: stnet::frame(stream),
             to_bs: HashMap::new(),
             from_bs: HashMap::new(),
             handlers: JoinSet::new(),
@@ -167,78 +153,6 @@ impl Client {
         }
         let to_client = self.to_bs.get(&d.id).unwrap();
         let _ = to_client.send(d).await;
-        Ok(())
-    }
-}
-
-struct TunnelHandler {
-    id: SocketAddr,
-    remote_port: u16,
-    stream: tnet::TcpStream,
-    to_remote: mpsc::Sender<stnet::Datagram>,
-    from_remote: mpsc::Receiver<stnet::Datagram>,
-}
-
-impl TunnelHandler {
-    fn new(
-        id: SocketAddr,
-        remote_port: u16,
-        stream: tnet::TcpStream,
-        to_remote: mpsc::Sender<stnet::Datagram>,
-        from_remote: mpsc::Receiver<stnet::Datagram>,
-    ) -> Self {
-        TunnelHandler { id, remote_port, stream, to_remote, from_remote }
-    }
-
-    async fn run(&mut self) -> Result<()> {
-        let (b_reader, b_writer) = self.stream.split();
-
-        let mut b_reader = BufReader::with_capacity(1500, b_reader);
-        let mut b_writer = BufWriter::with_capacity(1500, b_writer);
-
-        loop {
-            tokio::select! {
-                maybe_buf = b_reader.fill_buf() => {
-                    info!("read");
-                    let buf = match maybe_buf {
-                        Err(e) => {
-                            error!(cause = ?e, "failed to read from `a`");
-                            break;
-                        },
-                        Ok(buf) => buf,
-                    };
-                    let len = buf.len();
-                    // TODO send Datagram via channel
-                    let d = stnet::Datagram {
-                        id: self.id,
-                        port: self.remote_port,
-                        data: buf.to_vec(), // TODO nooooooooooo
-                    };
-                    info!(data = ?d, "read");
-                    b_reader.consume(len);
-                    if len == 0 {
-                        break;
-                    }
-                    self.to_remote.send(d).await?;
-                }
-                maybe_data = self.from_remote.recv() => {
-                    info!("write");
-                    let data: stnet::Datagram = match maybe_data {
-                        None => break,
-                        Some(data) => data,
-                    };
-                    info!(data = ?data, "write");
-                    if data.data.is_empty() {
-                        break;
-                    }
-                    b_writer.write_all(&data.data).await?;
-                    b_writer.flush().await?;
-                }
-            }
-        }
-        let _ = b_reader.into_inner();
-        let _ = b_writer.into_inner().shutdown().await;
-
         Ok(())
     }
 }

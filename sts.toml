@@ -1,2 +1,5 @@
 psk = "abcd"
 port = 12345
+
+[crypto]
+key = "stc.key"

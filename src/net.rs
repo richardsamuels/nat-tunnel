@@ -1,13 +1,14 @@
+use futures::{SinkExt, TryFutureExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
-use tokio_util::codec;
-use tokio::net as tnet;
 use std::net::SocketAddr;
 use std::vec::Vec;
-use futures::{SinkExt, TryStreamExt, TryFutureExt};
+use tokio::net as tnet;
+use tokio_util::codec;
+use crate::string::LimitedString;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Frame {
-    Auth(crate::LimitedString<512>),
+    Auth(LimitedString<512>),
     Tunnels(Vec<u16>),
     NewProxy(u16),
     Datagram(Datagram),
@@ -17,6 +18,59 @@ pub enum Frame {
 impl std::convert::From<Datagram> for Frame {
     fn from(value: Datagram) -> Self {
         Frame::Datagram(value)
+    }
+}
+
+pub type FramedLength = tokio_util::codec::Framed<tnet::TcpStream, codec::LengthDelimitedCodec>;
+pub type Framed = tokio_serde::Framed<
+    FramedLength,
+    Frame,
+    Frame,
+    tokio_serde::formats::MessagePack<Frame, Frame>,
+>;
+
+pub fn frame(stream: tnet::TcpStream) -> Framed {
+    let len_codec = codec::LengthDelimitedCodec::new();
+    let len_delimited = codec::Framed::new(stream, len_codec);
+
+    let codec = tokio_serde::formats::MessagePack::default();
+    Framed::new(len_delimited, codec)
+}
+
+pub struct Transport {
+    framed: Framed,
+}
+
+impl Transport {
+    pub fn new(stream: tnet::TcpStream) -> Transport {
+        Transport {
+            framed: frame(stream),
+        }
+    }
+
+    pub fn peer_addr(&self) -> std::result::Result<std::net::SocketAddr, std::io::Error> {
+        self.framed.get_ref().get_ref().peer_addr()
+    }
+
+    pub async fn read_frame(&mut self) -> std::result::Result<Frame, Error> {
+        match self.framed.try_next().await {
+            Err(e) => Err(e.into()),
+            Ok(None) => Err(Error::ConnectionDead),
+            Ok(Some(frame)) => Ok(frame),
+        }
+    }
+
+    pub async fn write_frame(&mut self, t: Frame) -> Result<()> {
+        self.framed
+            .send(t)
+            .or_else(|err| async move {
+                if reconnectable_err(&err) {
+                    Err(Error::ConnectionDead)
+                } else {
+                    Err(err.into())
+                }
+            })
+            .await
     }
 }
 
@@ -45,32 +99,23 @@ pub struct PlzDial {
 pub struct Auth {
     /// Pre-shared key
     #[serde(rename = "k")]
-    pub psk: crate::LimitedString<512>,
+    pub psk: LimitedString<512>,
 }
 
 impl std::convert::From<std::string::String> for Auth {
     fn from(value: std::string::String) -> Self {
-        Auth{psk: crate::LimitedString(value) }
+        Auth {
+            psk: LimitedString(value),
+        }
     }
 }
 
 impl Auth {
     pub fn new(psk: String) -> Auth {
         Auth {
-            psk: crate::LimitedString::<512>(psk),
+            psk: LimitedString::<512>(psk),
         }
     }
-}
-
-pub type FramedLength = tokio_util::codec::Framed<tnet::TcpStream, codec::LengthDelimitedCodec>;
-pub type Framed = tokio_serde::Framed<FramedLength, Frame, Frame, tokio_serde::formats::MessagePack<Frame, Frame>>;
-
-pub fn frame(stream: tnet::TcpStream) -> Framed {
-    let len_codec = codec::LengthDelimitedCodec::new();
-    let len_delimited = codec::Framed::new(stream, len_codec);
-
-    let codec = tokio_serde::formats::MessagePack::default();
-    Framed::new(len_delimited, codec)
 }
 
 /// Allows setting keepalive on the underlying socket.
@@ -134,38 +179,6 @@ impl std::convert::From<std::io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct Transport {
-    framed: Framed,
-}
-
-impl Transport {
-    pub fn new(stream: tnet::TcpStream) -> Transport {
-        Transport { framed: frame(stream) }
-    }
-
-    pub fn peer_addr(&self) -> std::result::Result<std::net::SocketAddr, std::io::Error> {
-        self.framed.get_ref().get_ref().peer_addr()
-    }
-
-    pub async fn read_frame(&mut self) -> std::result::Result<Frame, Error> {
-        match self.framed.try_next().await {
-            Err(e) => Err(e.into()),
-            Ok(None) => Err(Error::ConnectionDead),
-            Ok(Some(frame)) => Ok(frame),
-        }
-    }
-
-    pub async fn write_frame(&mut self, t: Frame) -> Result<()> {
-        self.framed.send(t).or_else(|err| async move {
-            if reconnectable_err(&err) {
-                Err(Error::ConnectionDead)
-            } else {
-                Err(err.into())
-            }
-        }).await
-    }
-}
-
 fn reconnectable_err(err: &futures::io::Error) -> bool {
     use futures::io::ErrorKind::*;
 
@@ -177,5 +190,4 @@ fn reconnectable_err(err: &futures::io::Error) -> bool {
         BrokenPipe => true,
         _ => false
     }
-
 }

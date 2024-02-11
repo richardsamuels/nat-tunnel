@@ -1,6 +1,5 @@
 // from https://stackoverflow.com/a/74483246
-use serde::de;
-use serde::ser;
+use serde::{de, ser};
 use std::ops::Deref;
 
 #[derive(Debug)]
