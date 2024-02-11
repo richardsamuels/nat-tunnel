@@ -16,16 +16,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
-      - run: ls target/*/release/**
       - name: Upload stc
         uses: actions/upload-artifact@v4
         with:
           name: stc-${{ matrix.target }}
-          path: ./target/*/stc
+          path: ./target/*/release/stc
           if-no-files-found: error
       - name: Upload sts
         uses: actions/upload-artifact@v4
         with:
           name: sts-${{ matrix.target }}
-          path: ./target/*/sts
+          path: ./target/*/release/sts
           if-no-files-found: error
