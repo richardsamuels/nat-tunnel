@@ -17,12 +17,15 @@ use tokio_serde::Framed;
 use tokio_util::codec;
 use tokio_util::codec::{FramedWrite, LengthDelimitedCodec};
 use tracing::{error, info};
+use tokio::task::JoinSet;
 
 pub struct Client {
     config: config::ClientConfig,
     transport: crate::net::Framed,
-    tunnels_tx: HashMap<SocketAddr, mpsc::Sender<stnet::Datagram>>,
-    tunnels_rx: HashMap<SocketAddr, mpsc::Receiver<stnet::Datagram>>,
+    to_bs: HashMap<SocketAddr, mpsc::Sender<stnet::Datagram>>,
+    from_bs: HashMap<SocketAddr, mpsc::Receiver<stnet::Datagram>>,
+
+    handlers: JoinSet<Result<SocketAddr>>
 }
 
 impl Client {
@@ -37,8 +40,9 @@ impl Client {
         let c = Client {
             config,
             transport,
-            tunnels_tx: HashMap::new(),
-            tunnels_rx: HashMap::new(),
+            to_bs: HashMap::new(),
+            from_bs: HashMap::new(),
+            handlers: JoinSet::new(),
         };
         Ok(c)
     }
@@ -65,11 +69,22 @@ impl Client {
     pub async fn run(&mut self) -> std::result::Result<(), stnet::Error> {
         loop {
             let mut futures: FuturesUnordered<_> = self
-                .tunnels_rx
+                .from_bs
                 .iter_mut()
-                .map(|(_, rx)| rx.recv())
+                .map(|(_, from_b)| from_b.recv())
                 .collect();
             tokio::select! {
+                maybe_join = self.handlers.join_next() => {
+                    drop(futures);
+                    let h = match maybe_join {
+                        None => continue,
+                        Some(Err(_)) => unreachable!(),
+                        Some(Ok(Ok(h))) => h,
+                        Some(Ok(Err(_))) => unreachable!(),
+                    };
+                    self.to_bs.remove(&h);
+                    self.from_bs.remove(&h);
+                }
                 maybe_read = self.transport.try_next() => {
                     drop(futures); // TODO really?
                     let maybe_frame = match maybe_read {
@@ -129,28 +144,29 @@ impl Client {
             }
         };
 
-        let (b_tx, b_rx) = mpsc::channel(16);
-        let (client_tx, client_rx) = mpsc::channel(16);
-        self.tunnels_tx.insert(d.id.clone(), client_tx);
-        self.tunnels_rx.insert(d.id.clone(), b_rx);
+        let (to_b, from_b) = mpsc::channel(16);
+        let (to_client, from_client) = mpsc::channel(16);
+        self.to_bs.insert(d.id, to_client);
+        self.from_bs.insert(d.id, from_b);
 
-        let id = d.id.clone();
-        let port = d.port.clone();
-        tokio::spawn(async move {
-            let mut h = TunnelHandler::new(id, port, b_stream, b_tx, client_rx);
+        let id = d.id;
+        let port = d.port;
+        self.handlers.spawn(async move {
+            let mut h = TunnelHandler::new(id, port, b_stream, to_b, from_client);
             if let Err(e) = h.run().await {
                 error!(cause = ?e, addr = ?b_addr, "tunnel experienced error");
             }
             info!(addr = ?b_addr, "Tunnel done");
+            Ok(id)
         });
         Ok(())
     }
     async fn datagram(&mut self, d: stnet::Datagram) -> std::result::Result<(), stnet::Error> {
-        if !self.tunnels_tx.contains_key(&d.id) {
+        if !self.to_bs.contains_key(&d.id) {
             self.new_conn(&d).await?;
         }
-        let tx = self.tunnels_tx.get(&d.id).unwrap();
-        let _ = tx.send(d).await;
+        let to_client = self.to_bs.get(&d.id).unwrap();
+        let _ = to_client.send(d).await;
         Ok(())
     }
 }
@@ -159,8 +175,8 @@ struct TunnelHandler {
     id: SocketAddr,
     remote_port: u16,
     stream: tnet::TcpStream,
-    tx: mpsc::Sender<stnet::Datagram>,
-    rx: mpsc::Receiver<stnet::Datagram>,
+    to_remote: mpsc::Sender<stnet::Datagram>,
+    from_remote: mpsc::Receiver<stnet::Datagram>,
 }
 
 impl TunnelHandler {
@@ -168,10 +184,10 @@ impl TunnelHandler {
         id: SocketAddr,
         remote_port: u16,
         stream: tnet::TcpStream,
-        tx: mpsc::Sender<stnet::Datagram>,
-        rx: mpsc::Receiver<stnet::Datagram>,
+        to_remote: mpsc::Sender<stnet::Datagram>,
+        from_remote: mpsc::Receiver<stnet::Datagram>,
     ) -> Self {
-        TunnelHandler { id, remote_port, stream, tx, rx }
+        TunnelHandler { id, remote_port, stream, to_remote, from_remote }
     }
 
     async fn run(&mut self) -> Result<()> {
@@ -183,6 +199,7 @@ impl TunnelHandler {
         loop {
             tokio::select! {
                 maybe_buf = b_reader.fill_buf() => {
+                    info!("read");
                     let buf = match maybe_buf {
                         Err(e) => {
                             error!(cause = ?e, "failed to read from `a`");
@@ -191,28 +208,36 @@ impl TunnelHandler {
                         Ok(buf) => buf,
                     };
                     let len = buf.len();
-                    if len == 0 {
-                        break;
-                    }
                     // TODO send Datagram via channel
                     let d = stnet::Datagram {
-                        id: self.id.clone(),
+                        id: self.id,
                         port: self.remote_port,
                         data: buf.to_vec(), // TODO nooooooooooo
                     };
-                    self.tx.send(d).await?;
+                    info!(data = ?d, "read");
                     b_reader.consume(len);
+                    if len == 0 {
+                        break;
+                    }
+                    self.to_remote.send(d).await?;
                 }
-                maybe_data = self.rx.recv() => {
+                maybe_data = self.from_remote.recv() => {
+                    info!("write");
                     let data: stnet::Datagram = match maybe_data {
                         None => break,
                         Some(data) => data,
                     };
+                    info!(data = ?data, "write");
+                    if data.data.is_empty() {
+                        break;
+                    }
                     b_writer.write_all(&data.data).await?;
                     b_writer.flush().await?;
                 }
             }
         }
+        let _ = b_reader.into_inner();
+        let _ = b_writer.into_inner().shutdown().await;
 
         Ok(())
     }

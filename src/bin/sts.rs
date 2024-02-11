@@ -1,11 +1,10 @@
-use simple_tunnel::Result;
-use simple_tunnel::{config};
-use simple_tunnel::remote;
+use simple_tunnel::{config, server, Result};
 use std::net::SocketAddr;
 use tracing::{error, info};
 use tokio::net as tnet;
 
-#[tokio::main]
+//#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let c = config::load_server_config();
@@ -14,7 +13,7 @@ async fn main() -> Result<()> {
     info!("listening on {}", &addr);
     let listener = tnet::TcpListener::bind(addr).await?;
 
-    let mut transport = remote::Remote::new(c, listener);
+    let mut transport = server::Server::new(c, listener);
     match transport.run().await {
         Err(e) => return Err(e),
         Ok(()) => Ok(()),

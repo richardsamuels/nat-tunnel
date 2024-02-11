@@ -1,7 +1,7 @@
 pub mod config;
 
 pub mod client;
-pub mod remote;
+pub mod server;
 
 pub mod net;
 

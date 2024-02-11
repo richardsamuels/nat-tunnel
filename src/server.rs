@@ -13,22 +13,22 @@ use futures::Future;
 use futures::SinkExt;
 use tokio::net as tnet;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 use std::collections::{HashMap, HashSet};
 
-pub struct Remote {
+pub struct Server {
     listener: tnet::TcpListener,
     config: Arc<RwLock<config::ServerConfig>>,
-    connman: ArchConnMan,
+    active_tunnels: ArcMActiveTunnels,
 }
 
-impl Remote {
+impl Server {
     pub fn new(config: config::ServerConfig, listener: tnet::TcpListener) -> Self {
-        Remote {
+        Server {
             listener,
             config: Arc::new(config.into()),
-            connman: Arc::new(ConnMan::new().into()),
+            active_tunnels: Arc::new(ActiveTunnels::new().into()),
         }
     }
 
@@ -43,12 +43,14 @@ impl Remote {
             };
 
             let c = self.config.clone();
-            let connman = self.connman.clone();
+            let active_tunnels = self.active_tunnels.clone();
             tokio::spawn(async move {
-                let mut h = ClientHandler::new(c, connman, socket);
+                trace!(addr = ?addr, "client handler start");
+                let mut h = ClientHandler::new(c, active_tunnels, socket);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, addr = ?addr, "client connection dropped");
                 }
+                trace!(addr = ?addr, "client handler end");
             });
         }
     }
@@ -57,28 +59,28 @@ impl Remote {
 struct ClientHandler {
     transport: stnet::Transport,
     config: Arc<RwLock<config::ServerConfig>>,
-    connman: ArchConnMan,
+    active_tunnels: ArcMActiveTunnels,
 
-    tx: mpsc::Sender<stnet::Datagram>,
-    rx: mpsc::Receiver<stnet::Datagram>,
+    to_client: mpsc::Sender<stnet::Datagram>,
+    from_tunnels: mpsc::Receiver<stnet::Datagram>,
 
-    tunnel_tx: TunnelHdlr,
+    to_tunnels: TunnelHdlr,
 }
 
 impl ClientHandler {
     fn new(
         config: Arc<RwLock<config::ServerConfig>>,
-        connman: ArchConnMan,
+        active_tunnels: ArcMActiveTunnels,
         stream: tnet::TcpStream,
     ) -> ClientHandler {
         let (tx, rx) = mpsc::channel(128);
         ClientHandler {
             transport: stnet::Transport::new(stream),
-            connman,
+            active_tunnels,
             config,
-            tunnel_tx: Arc::new(HashMap::new().into()),
-            tx,
-            rx,
+            to_tunnels: Arc::new(HashMap::new().into()),
+            to_client: tx,
+            from_tunnels: rx,
         }
     }
 
@@ -103,10 +105,10 @@ impl ClientHandler {
 
         let mut handlers: HashMap<u16, _> = HashMap::new();
 
-        let mut connman = self.connman.lock().await;
         {
+            let active_tunnels = self.active_tunnels.lock().unwrap();
             for t in &tunnels {
-                if connman.all.contains(t) {
+                if active_tunnels.contains(t) {
                     return Err(format!(
                         "client sent configuration with duplicate remote_port {}",
                         &t
@@ -117,22 +119,24 @@ impl ClientHandler {
         }
 
         let handles = tunnels.iter().map(|t| {
-            let t = *t;
-            let r_tx = self.tx.clone();
-            let ttx = self.tunnel_tx.clone();
+            let to_client = self.to_client.clone();
+            let to_tunnels = self.to_tunnels.clone();
 
-            let port = t;
+            let port = *t;
             tokio::spawn(async move {
-                let mut h = Tunnel::new(port, ttx, r_tx);
+                trace!(port = ?port, "tunnel start");
+                let mut h = Tunnel::new(port, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
+                trace!(port = ?port, "tunnel end");
             })
         });
+        let mut active_tunnels = self.active_tunnels.lock().unwrap();
         tunnels.iter().zip(handles).for_each(|x| {
             let (port, h) = x;
             handlers.insert(*port, h);
-            connman.all.insert(*port);
+            active_tunnels.insert(*port);
         });
         Ok(handlers)
     }
@@ -143,7 +147,7 @@ impl ClientHandler {
         loop {
             tokio::select! {
                 // Read from network
-                maybe_rx = self.rx.recv() => {
+                maybe_rx = self.from_tunnels.recv() => {
                     let data: stnet::Datagram = match maybe_rx {
                         None => break,
                         Some(data) => data,
@@ -158,13 +162,16 @@ impl ClientHandler {
                     };
                     match frame {
                         stnet::Frame::Datagram(d) => {
-                            let ttx = self.tunnel_tx.lock().await;
-                            let tx = match ttx.get(&d.id) {
-                                None => {
-                                    error!(addr = ?d.id, "no channel for port");
-                                    break
+                            let tx = {
+                                let to_tunnels = self.to_tunnels.lock().unwrap();
+                                match to_tunnels.get(&d.id) {
+                                    None => {
+                                        error!(addr = ?d.id, "no channel for port");
+                                        break
+                                    }
+                                    Some(tx) => tx.clone()
+
                                 }
-                                Some(tx) => tx
                             };
                             tx.send(d).await?;
                         }
@@ -177,36 +184,35 @@ impl ClientHandler {
             }
         }
 
-        let mut connman = self.connman.lock().await;
-        info!(tunnels = ?connman.tx.keys(), "cleaning up tunnels");
+        let mut active_tunnels = self.active_tunnels.lock().unwrap();
+        info!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
         for (t, h) in handlers.iter() {
             h.abort();
-            connman.tx.remove(t);
-            connman.rx.remove(t);
+            active_tunnels.remove(t);
         }
         Ok(())
     }
 }
 
-type TunnelHdlr = Arc<tokio::sync::Mutex<HashMap<SocketAddr, mpsc::Sender<stnet::Datagram>>>>;
+type TunnelHdlr = Arc<std::sync::Mutex<HashMap<SocketAddr, mpsc::Sender<stnet::Datagram>>>>;
 
 struct Tunnel {
     remote_port: u16,
-    client_tx: mpsc::Sender<stnet::Datagram>,
+    to_client: mpsc::Sender<stnet::Datagram>,
 
-    tunnel_tx: TunnelHdlr,
+    to_tunnels: TunnelHdlr,
 }
 
 impl Tunnel {
     fn new(
         remote_port: u16,
-        tunnel_tx: TunnelHdlr,
-        client_tx: mpsc::Sender<stnet::Datagram>,
+        to_tunnels: TunnelHdlr,
+        to_client: mpsc::Sender<stnet::Datagram>,
     ) -> Self {
         Tunnel {
             remote_port,
-            client_tx,
-            tunnel_tx,
+            to_tunnels,
+            to_client,
         }
     }
     async fn run(&mut self) -> Result<()> {
@@ -215,22 +221,24 @@ impl Tunnel {
             let (a_stream, a_addr) = a_listener.accept().await?;
             info!(port = self.remote_port, a_addr = ?a_addr, "incoming connection");
 
-            let (handler_tx, handler_rx) = mpsc::channel::<stnet::Datagram>(32);
+            let (to_tunnel, from_client) = mpsc::channel::<stnet::Datagram>(32);
             {
-                let mut tu = self.tunnel_tx.lock().await;
-                tu.insert(a_addr.clone(), handler_tx);
+                let mut tu = self.to_tunnels.lock().unwrap();
+                tu.insert(a_addr, to_tunnel);
             }
 
-            let port = self.remote_port.clone();
-            let c_tx = self.client_tx.clone();
-            let ttx = self.tunnel_tx.clone();
+            let port = self.remote_port;
+            let to_client = self.to_client.clone();
+            let to_tunnels = self.to_tunnels.clone();
             tokio::spawn(async move {
-                let mut h = TunnelHandler::new(port, a_stream, c_tx, handler_rx);
+                trace!(addr = ?a_addr, "Tunnel handler start");
+                let mut h = TunnelHandler::new(port, a_stream, to_client, from_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, addr = ?a_addr, "error redirecting");
                 }
-                let mut tu = ttx.lock().await;
+                let mut tu = to_tunnels.lock().unwrap();
                 tu.remove(&a_addr);
+                trace!(addr = ?a_addr, "Tunnel handler end");
             });
         }
     }
@@ -239,87 +247,82 @@ impl Tunnel {
 struct TunnelHandler {
     remote_port: u16,
     stream: tnet::TcpStream,
-    data_tx: mpsc::Sender<stnet::Datagram>,
-    data_rx: mpsc::Receiver<stnet::Datagram>,
+    to_client: mpsc::Sender<stnet::Datagram>,
+    from_client: mpsc::Receiver<stnet::Datagram>,
 }
 
 impl TunnelHandler {
     fn new(
         remote_port: u16,
         stream: tnet::TcpStream,
-        data_tx: mpsc::Sender<stnet::Datagram>,
-        data_rx: mpsc::Receiver<stnet::Datagram>,
+        to_client: mpsc::Sender<stnet::Datagram>,
+        from_client: mpsc::Receiver<stnet::Datagram>,
     ) -> TunnelHandler {
         TunnelHandler {
             remote_port,
             stream,
-            data_tx,
-            data_rx,
+            to_client,
+            from_client,
         }
     }
 
     async fn run(&mut self) -> Result<()> {
-        'outer: loop {
-            let a_addr = self.stream.peer_addr()?;
+        let a_addr = self.stream.peer_addr()?;
 
-            let (a_reader, a_writer) = self.stream.split();
+        let (a_reader, a_writer) = self.stream.split();
 
-            let mut a_reader = BufReader::with_capacity(1500, a_reader);
-            let mut a_writer = BufWriter::with_capacity(1500, a_writer);
+        let mut a_reader = BufReader::with_capacity(1500, a_reader);
+        let mut a_writer = BufWriter::with_capacity(1500, a_writer);
 
-            loop {
-                tokio::select! {
-                    // Read from network (a)
-                    maybe_buf = a_reader.fill_buf() => {
-                        let buf = match maybe_buf {
-                            Err(e) => {
-                                error!(cause = ?e, "failed to read from `a`");
-                                break;
-                            },
-                            Ok(buf) => buf,
-                        };
-                        let len = buf.len();
-                        let d = stnet::Datagram {
-                            id: a_addr,
-                            port: self.remote_port,
-                            data: buf.to_vec(), // TODO nooooooooooo
-                        };
-                        self.data_tx.send(d).await?;
-                        a_reader.consume(len);
+        loop {
+            tokio::select! {
+                // Read from network (a)
+                maybe_buf = a_reader.fill_buf() => {
+                    info!(mb = ?maybe_buf,"read");
+                    let buf = match maybe_buf {
+                        Err(e) => {
+                            error!(cause = ?e, "failed to read from `a`");
+                            break;
+                        },
+                        Ok(buf) => buf,
+                    };
+                    let len = buf.len();
+                    let d = stnet::Datagram {
+                        id: a_addr,
+                        port: self.remote_port,
+                        data: buf.to_vec(), // TODO nooooooooooo
+                    };
+                    info!(data = ?d, "read");
+                    a_reader.consume(len);
+                    if len == 0 {
+                        break;
                     }
+                    self.to_client.send(d).await?;
+                }
 
-                    // Read from channel (network)
-                    maybe_data = self.data_rx.recv() => {
-                        let data: stnet::Datagram = match maybe_data {
-                            None => break 'outer,
-                            Some(data) => data,
-                        };
-                        a_writer.write_all(&data.data).await?;
-                        a_writer.flush().await?;
+                // Read from channel (network)
+                maybe_data = self.from_client.recv() => {
+                    info!(md = ?maybe_data, "write");
+                    let data: stnet::Datagram = match maybe_data {
+                        None => break,
+                        Some(data) => data,
+                    };
+                    info!(data = ?data, "write");
+                    if data.data.is_empty() {
+                        break;
                     }
+                    a_writer.write_all(&data.data).await?;
+                    a_writer.flush().await?;
                 }
             }
         }
+        let _ = a_reader.into_inner();
+        let _ = a_writer.into_inner().shutdown().await;
 
         Ok(())
     }
 }
 
-struct ConnMan {
-    /// listeners bound on the remote for requests from `A`s
-    tx: HashMap<u16, mpsc::Sender<stnet::Datagram>>,
-    rx: HashMap<u16, mpsc::Receiver<stnet::Datagram>>,
-    all: HashSet<u16>,
-}
+type ActiveTunnels = HashSet<u16>;
 
-impl ConnMan {
-    fn new() -> Self {
-        ConnMan {
-            tx: HashMap::new(),
-            rx: HashMap::new(),
-            all: HashSet::new(),
-        }
-    }
-}
-
-type ArchConnMan = Arc<tokio::sync::Mutex<ConnMan>>;
+type ArcMActiveTunnels= Arc<std::sync::Mutex<ActiveTunnels>>;
