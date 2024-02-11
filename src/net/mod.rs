@@ -1,5 +1,5 @@
-mod frame;
+pub mod frame;
 pub use frame::*;
 
-mod error;
+pub mod error;
 pub use error::*;

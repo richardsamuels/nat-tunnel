@@ -1,5 +1,4 @@
-use crate::Result;
-use crate::{config, net as stnet};
+use crate::{config, net as stnet, Result};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net as tnet;
@@ -110,25 +109,22 @@ impl ClientHandler {
             }
         }
 
-        let handles = tunnels.iter().map(|t| {
+        let mut active_tunnels = self.active_tunnels.lock().unwrap();
+        tunnels.iter().for_each(|t| {
             let to_client = self.to_client.clone();
             let to_tunnels = self.to_tunnels.clone();
 
             let port = *t;
-            tokio::spawn(async move {
+            let h = tokio::spawn(async move {
                 trace!(port = ?port, "tunnel start");
                 let mut h = Tunnel::new(port, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
                 trace!(port = ?port, "tunnel end");
-            })
-        });
-        let mut active_tunnels = self.active_tunnels.lock().unwrap();
-        tunnels.iter().zip(handles).for_each(|x| {
-            let (port, h) = x;
-            handlers.insert(*port, h);
-            active_tunnels.insert(*port);
+            });
+            handlers.insert(port, h);
+            active_tunnels.insert(port);
         });
         Ok(handlers)
     }
@@ -146,6 +142,7 @@ impl ClientHandler {
                     };
                     self.transport.write_frame(data.into()).await?;
                 }
+
                 maybe_frame = self.transport.read_frame() => {
                     let frame = match maybe_frame {
                         Err(stnet::Error::ConnectionDead) => break,
@@ -215,8 +212,8 @@ impl Tunnel {
 
             let (to_tunnel, from_client) = mpsc::channel::<stnet::Datagram>(32);
             {
-                let mut tu = self.to_tunnels.lock().unwrap();
-                tu.insert(a_addr, to_tunnel);
+                let mut tunnels = self.to_tunnels.lock().unwrap();
+                tunnels.insert(a_addr, to_tunnel);
             }
 
             let port = self.remote_port;
@@ -228,8 +225,8 @@ impl Tunnel {
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, addr = ?a_addr, "error redirecting");
                 }
-                let mut tu = to_tunnels.lock().unwrap();
-                tu.remove(&a_addr);
+                let mut tunnels = to_tunnels.lock().unwrap();
+                tunnels.remove(&a_addr);
                 trace!(addr = ?a_addr, "Tunnel handler end");
             });
         }

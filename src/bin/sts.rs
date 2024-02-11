@@ -1,31 +1,22 @@
 use clap::Parser;
 use simple_tunnel::{config, server, Result};
 use std::net::SocketAddr;
-use std::process::ExitCode;
+use std::process::exit;
 use tokio::net as tnet;
-use tracing::{error, info};
+use tracing::info;
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = config::ServerArgs::parse();
 
     let c = config::load_server_config(&args.config);
 
-    if let Some(config::Commands::GenerateKeyPair { bits }) = args.command {
-        config::generate_key_pair(&args.config, "sts", bits);
+    if let Some(config::Commands::GenerateKey {}) = args.command {
+        config::generate_key(&args.config, "sts").await?;
+        exit(0);
     }
 
-    match tokio(c) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(e) => {
-            error!(cause =?e, "exiting");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-#[tokio::main]
-async fn tokio(c: config::ServerConfig) -> Result<()> {
     let addr: SocketAddr = format!("0.0.0.0:{}", &c.port).parse().unwrap();
     info!("listening on {}", &addr);
     let listener = tnet::TcpListener::bind(addr).await?;

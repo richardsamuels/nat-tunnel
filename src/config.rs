@@ -1,8 +1,8 @@
+use crate::Result;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command};
 use std::vec::Vec;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -33,7 +33,7 @@ impl ClientConfig {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Crypto {
-    key: PathBuf,
+    pub key: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -95,37 +95,9 @@ pub fn load_client_config(config: &Path) -> ClientConfig {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
-    GenerateKeyPair {
-        #[arg(short, long, default_value = "4096")]
-        bits: u16,
-    },
+    GenerateKey {},
 }
 
-pub fn generate_key_pair(config_file: &Path, target: &str, bits: u16) {
-    println!("Attempting to generate a keypair with openssl");
-    let parent = config_file.parent().unwrap().canonicalize().unwrap();
-    if !parent.is_dir() {
-        eprintln!(
-            "Path {:?} does not appear to be a directory. Giving up on key generation",
-            parent
-        );
-        exit(1);
-    }
-
-    let private_key: PathBuf = [parent, format!("{}.key", target).into()].iter().collect();
-
-    println!("Creating key at {:?}", private_key);
-    Command::new("openssl")
-        .arg("genrsa")
-        .arg("-out")
-        .arg(&private_key)
-        .arg(bits.to_string())
-        .output()
-        .expect("Failed to generate private key");
-
-    println!("Add the following to {:?}:\n", private_key);
-    println!("[crypto]");
-    println!("key = \"{}\"", private_key.to_str().unwrap());
-
-    exit(0);
+pub async fn generate_key(_config_file: &Path, _target: &str) -> Result<()> {
+    unimplemented!();
 }

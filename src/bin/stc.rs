@@ -1,27 +1,21 @@
 use clap::Parser;
 use simple_tunnel::{client, config, net as stnet, Result};
-use std::process::ExitCode;
+use std::process::exit;
 use tokio::net as tnet;
 use tracing::{error, info};
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = config::ClientArgs::parse();
 
     let c = config::load_client_config(&args.config);
 
-    if let Some(config::Commands::GenerateKeyPair { bits }) = args.command {
-        config::generate_key_pair(&args.config, "sts", bits);
+    if let Some(config::Commands::GenerateKey {}) = args.command {
+        config::generate_key(&args.config, "stc").await?;
+        exit(0);
     }
 
-    match tokio(c) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
-    }
-}
-
-#[tokio::main]
-async fn tokio(c: config::ClientConfig) -> Result<()> {
     let mut tries = 5;
     loop {
         let addr = format!("{}:{}", &c.addr, &c.port);

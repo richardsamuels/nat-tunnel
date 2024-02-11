@@ -19,7 +19,7 @@ pub struct Client<'a> {
 }
 
 impl<'a> Client<'a> {
-    pub fn new(config: &config::ClientConfig, stream: tnet::TcpStream) -> Result<Client> {
+    pub fn new(config: &'a config::ClientConfig, stream: tnet::TcpStream) -> Result<Client<'a>> {
         stnet::set_keepalive(&stream, true)?;
         let c = Client {
             config,
