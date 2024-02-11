@@ -1,10 +1,10 @@
-use futures::{SinkExt, TryFutureExt, TryStreamExt};
+use crate::string::LimitedString;
+use futures::{SinkExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::vec::Vec;
 use tokio::net as tnet;
 use tokio_util::codec;
-use crate::string::LimitedString;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Frame {
@@ -29,7 +29,7 @@ pub type Framed = tokio_serde::Framed<
     tokio_serde::formats::MessagePack<Frame, Frame>,
 >;
 
-pub fn frame(stream: tnet::TcpStream) -> Framed {
+fn frame(stream: tnet::TcpStream) -> Framed {
     let len_codec = codec::LengthDelimitedCodec::new();
     let len_delimited = codec::Framed::new(stream, len_codec);
 
@@ -61,16 +61,14 @@ impl Transport {
     }
 
     pub async fn write_frame(&mut self, t: Frame) -> Result<()> {
-        self.framed
-            .send(t)
-            .or_else(|err| async move {
-                if reconnectable_err(&err) {
-                    Err(Error::ConnectionDead)
-                } else {
-                    Err(err.into())
-                }
-            })
-            .await
+        match self.framed.send(t).await {
+            Err(e) if reconnectable_err(&e) => {
+                return Err(Error::ConnectionDead);
+            }
+            Err(e) => return Err(e.into()),
+            Ok(()) => (),
+        };
+        self.framed.flush().await.map_err(|x| x.into())
     }
 }
 
@@ -82,16 +80,6 @@ pub struct Datagram {
     pub port: u16,
     #[serde(rename = "d")]
     pub data: Vec<u8>,
-}
-
-/// Represents an incoming request on the remote's remote_port that will be
-/// redirected to Remote's via_port.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PlzDial {
-    #[serde(rename = "r")]
-    pub remote_port: u16,
-    #[serde(rename = "v")]
-    pub via_port: u16,
 }
 
 /// Represents an authentication request

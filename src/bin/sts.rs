@@ -1,9 +1,9 @@
+use clap::Parser;
 use simple_tunnel::{config, server, Result};
 use std::net::SocketAddr;
-use tracing::{error, info};
-use tokio::net as tnet;
-use clap::Parser;
 use std::process::ExitCode;
+use tokio::net as tnet;
+use tracing::{error, info};
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt::init();
@@ -11,7 +11,7 @@ fn main() -> ExitCode {
 
     let c = config::load_server_config(&args.config);
 
-    if let Some(config::Commands::GenerateKeyPair{bits}) = args.command {
+    if let Some(config::Commands::GenerateKeyPair { bits }) = args.command {
         config::generate_key_pair(&args.config, "sts", bits);
     }
 

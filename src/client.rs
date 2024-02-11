@@ -1,9 +1,7 @@
 use crate::tunnel::TunnelHandler;
 use crate::{config, net as stnet, net::Frame, Result};
 use futures::stream::FuturesUnordered;
-use futures::SinkExt;
 use futures::StreamExt;
-use futures::TryStreamExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net as tnet;
@@ -13,7 +11,7 @@ use tracing::{error, info};
 
 pub struct Client<'a> {
     config: &'a config::ClientConfig,
-    transport: crate::net::Framed,
+    transport: stnet::Transport,
     to_bs: HashMap<SocketAddr, mpsc::Sender<stnet::Datagram>>,
     from_bs: HashMap<SocketAddr, mpsc::Receiver<stnet::Datagram>>,
 
@@ -25,7 +23,7 @@ impl<'a> Client<'a> {
         stnet::set_keepalive(&stream, true)?;
         let c = Client {
             config,
-            transport: stnet::frame(stream),
+            transport: stnet::Transport::new(stream),
             to_bs: HashMap::new(),
             from_bs: HashMap::new(),
             handlers: JoinSet::new(),
@@ -35,9 +33,8 @@ impl<'a> Client<'a> {
 
     pub async fn push_tunnel_config(&mut self) -> Result<()> {
         self.transport
-            .send(Frame::Auth(self.config.psk.clone().into()))
+            .write_frame(Frame::Auth(self.config.psk.clone().into()))
             .await?;
-        self.transport.flush().await?;
 
         let tunnels = {
             let mut out = Vec::new();
@@ -46,8 +43,7 @@ impl<'a> Client<'a> {
             }
             out
         };
-        self.transport.send(Frame::Tunnels(tunnels)).await?;
-        self.transport.flush().await?;
+        self.transport.write_frame(Frame::Tunnels(tunnels)).await?;
         info!("Pushed tunnel config to remote");
         Ok(())
     }
@@ -71,18 +67,14 @@ impl<'a> Client<'a> {
                     self.to_bs.remove(&h);
                     self.from_bs.remove(&h);
                 }
-                maybe_read = self.transport.try_next() => {
+                maybe_frame = self.transport.read_frame() => {
                     drop(futures); // TODO really?
-                    let maybe_frame = match maybe_read {
+                    let frame = match maybe_frame {
                         Err(e) => {
                             error!(cause = ?e, "failed to read");
-                            return Err(e.into());
+                            return Err(e);
                         }
                         Ok(s) => s,
-                    };
-                    let frame: Frame = match maybe_frame {
-                        None => return Err(stnet::Error::ConnectionDead),
-                        Some(f) => f,
                     };
 
                     match frame {
@@ -107,9 +99,7 @@ impl<'a> Client<'a> {
                         Some(Some(f)) => f,
                     };
 
-                    if let Err(e) = self.transport.send(data.into()).await {
-                        return Err(e.into());
-                    };
+                    self.transport.write_frame(data.into()).await?;
                 }
             }
         }
