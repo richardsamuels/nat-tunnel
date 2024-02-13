@@ -1,38 +1,37 @@
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("connection has died")]
     ConnectionDead,
+    #[error("connection refused")]
+    ConnectionRefused,
+    #[error("{0}")]
     Io(std::io::Error),
+    #[error("{0}")]
     MsgPackDecode(rmp_serde::decode::Error),
+    #[error("{0}")]
     MsgPackEncode(rmp_serde::encode::Error),
+    #[error("received unexpected frame")]
+    UnexpectedFrame,
+    #[error("{0}")]
     Other(String),
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::Io(e) => write!(f, "{}", e),
-            Error::MsgPackEncode(e) => write!(f, "{}", e),
-            Error::MsgPackDecode(e) => write!(f, "{}", e),
-            Error::Other(s) => write!(f, "{}", s),
-            Error::ConnectionDead => write!(f, "simple_tunnel::net::Error::ConnectionDead"),
-        }
+impl<T> std::convert::From<tokio::sync::mpsc::error::SendError<T>> for Error {
+    fn from(value: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        Error::Other(value.to_string())
     }
-}
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(e) => Some(e),
-            Error::MsgPackDecode(e) => Some(e),
-            Error::MsgPackEncode(e) => Some(e),
-            _ => None,
-        }
-    }
 }
 
 impl std::convert::From<std::string::String> for Error {
     fn from(value: std::string::String) -> Self {
         Error::Other(value)
+    }
+}
+
+impl std::convert::From<&str> for Error {
+    fn from(value: &str) -> Self {
+        Error::Other(value.to_string())
     }
 }
 

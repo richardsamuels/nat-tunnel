@@ -1,12 +1,13 @@
-use crate::{config, net as stnet, Result};
+use crate::{config, net as stnet, Result, redirector::Redirector};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tracing::{error, info, trace};
-
-use crate::tunnel::TunnelHandler;
 use std::collections::{HashMap, HashSet};
+
+type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
+type ActiveTunnels = HashSet<u16>;
 
 pub struct Server {
     listener: tnet::TcpListener,
@@ -50,12 +51,12 @@ impl Server {
 struct ClientHandler {
     transport: stnet::Transport,
     config: Arc<RwLock<config::ServerConfig>>,
+
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 
-    to_client: mpsc::Sender<stnet::Datagram>,
-    from_tunnels: mpsc::Receiver<stnet::Datagram>,
-
-    to_tunnels: Arc<Mutex<Tunnels>>,
+    to_client: mpsc::Sender<stnet::RedirectorFrame>,
+    from_tunnels: mpsc::Receiver<stnet::RedirectorFrame>,
+    to_tunnels: Arc<Mutex<TunnelChannels>>,
 }
 
 impl ClientHandler {
@@ -75,98 +76,122 @@ impl ClientHandler {
         }
     }
 
-    async fn auth(&mut self) -> Result<HashMap<u16, tokio::task::JoinHandle<()>>> {
+    /// Validate the client and create external listeners
+    async fn auth(&mut self) -> Result<()> {
         let addr = self.transport.peer_addr()?;
         info!(addr = ?addr, "accepted connection from client");
+
         let frame = self.transport.read_frame().await?;
-        if let stnet::Frame::Auth(auth) = frame {
+        {
+            let auth = match frame {
+                stnet::Frame::Auth(ref auth) => auth,
+                _ => return Err(stnet::Error::UnexpectedFrame),
+            };
+
             let c = self.config.read().unwrap();
             if c.psk != auth.0 {
                 // TODO: constant time compare required.
                 return Err(format!("Incorrect PSK from {:?}", addr).into());
             }
-        } else {
-            return Err("expected auth frame, but did not get it".into());
-        };
+        }
+        self.transport.write_frame(frame).await?; // ack the auth
+        Ok(())
+    }
 
+    async fn validate_tunnels(&mut self) -> Result<Vec<u16>> {
         let tunnels = match self.transport.read_frame().await? {
             stnet::Frame::Tunnels(t) => t,
-            _ => return Err("client did not send tunnel config".into()),
+            _ => return Err("client did not send tunnel config".to_string().into()),
         };
 
-        let mut handlers: HashMap<u16, _> = HashMap::new();
-
-        {
+        let bad_tunnels: Vec<_> = {
             let active_tunnels = self.active_tunnels.lock().unwrap();
-            for t in &tunnels {
-                if active_tunnels.contains(t) {
-                    return Err(format!(
-                        "client sent configuration with duplicate remote_port {}",
-                        &t
-                    )
-                    .into());
-                }
-            }
-        }
+            tunnels.iter().filter(|x| active_tunnels.contains(x)).collect()
+        };
 
+        if !bad_tunnels.is_empty() {
+            self.transport.write_frame(stnet::Frame::Kthxbai).await?;
+            return Err(format!(
+                    "client sent configuration with remote_port {:?}, which is already in use",
+                    bad_tunnels
+            ).into())
+        }
+        self.transport.write_frame(stnet::Frame::Tunnels(tunnels.clone())).await?; // Ack the config
+
+        Ok(tunnels)
+    }
+
+    async fn make_tunnels(&mut self) -> Result<HashMap<u16, tokio::task::JoinHandle<()>>> {
+        let tunnels = self.validate_tunnels().await?;
+
+        let mut tunnel_handlers: HashMap<u16, _> = HashMap::new();
         let mut active_tunnels = self.active_tunnels.lock().unwrap();
         tunnels.iter().for_each(|t| {
             let to_client = self.to_client.clone();
             let to_tunnels = self.to_tunnels.clone();
-
             let port = *t;
             let h = tokio::spawn(async move {
-                trace!(port = ?port, "tunnel start");
-                let mut h = Tunnel::new(port, to_tunnels, to_client);
+                trace!(port = ?port, "external listener start");
+                let mut h = ExternalListener::new(port, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
-                trace!(port = ?port, "tunnel end");
+                trace!(port = ?port, "external listener end");
             });
-            handlers.insert(port, h);
+            tunnel_handlers.insert(port, h);
             active_tunnels.insert(port);
         });
-        Ok(handlers)
+        Ok(tunnel_handlers)
+    }
+
+    fn get_tunnel_tx(&self, id: SocketAddr) -> Option<mpsc::Sender<stnet::RedirectorFrame>> {
+        let to_tunnels = self.to_tunnels.lock().unwrap();
+        to_tunnels.get(&id).cloned()
     }
 
     async fn run(&mut self) -> Result<()> {
-        let handlers = self.auth().await?;
+        if self.auth().await.is_err() {
+            self.transport.write_frame(stnet::Frame::Kthxbai).await?;
+        };
+        let handlers = self.make_tunnels().await?;
 
         loop {
             tokio::select! {
-                // Read from network
+                // Redirect data from tunnel to client
                 maybe_rx = self.from_tunnels.recv() => {
-                    let data: stnet::Datagram = match maybe_rx {
+                    let rframe = match maybe_rx {
                         None => break,
                         Some(data) => data,
                     };
-                    self.transport.write_frame(data.into()).await?;
+                    self.transport.write_frame(rframe.into()).await?;
                 }
 
+                // Read from network
                 maybe_frame = self.transport.read_frame() => {
+                    trace!(frame = ?maybe_frame, "FRAME");
                     let frame = match maybe_frame {
                         Err(stnet::Error::ConnectionDead) => break,
-                        Err(e) => return Err(e.into()),
+                        Err(e) => {
+                            error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed reading frame from network");
+                            break
+                        }
                         Ok(f) => f,
                     };
                     match frame {
-                        stnet::Frame::Datagram(d) => {
-                            let tx = {
-                                let to_tunnels = self.to_tunnels.lock().unwrap();
-                                match to_tunnels.get(&d.id) {
-                                    None => {
-                                        error!(addr = ?d.id, "no channel for port");
-                                        break
-                                    }
-                                    Some(tx) => tx.clone()
-
-                                }
+                        stnet::Frame::Redirector(r) => {
+                            let id = match r {
+                                stnet::RedirectorFrame::Datagram(ref d) => d.id,
+                                stnet::RedirectorFrame::KillListener(id) => id,
                             };
-                            tx.send(d).await?;
+                            match self.get_tunnel_tx(id) {
+                                None => error!(addr = ?id, "no channel for port"),
+                                Some(tx) => tx.send(r).await?,
+                            }
                         }
+
                         stnet::Frame::Kthxbai => break,
-                        _ => {
-                            error!("unexpected frame");
+                        f => {
+                            error!(frame = ?f, "unexpected frame");
                         }
                     };
                 }
@@ -183,54 +208,56 @@ impl ClientHandler {
     }
 }
 
-type Tunnels = HashMap<SocketAddr, mpsc::Sender<stnet::Datagram>>;
+//impl Drop for ClientHandler {
+//    fn drop(&mut self) {
+//        let mut active_tunnels = self.active_tunnels.lock().unwrap();
+//
+//    }
+//}
 
-struct Tunnel {
+struct ExternalListener {
     remote_port: u16,
-    to_client: mpsc::Sender<stnet::Datagram>,
-
-    to_tunnels: Arc<Mutex<Tunnels>>,
+    to_client: mpsc::Sender<stnet::RedirectorFrame>,
+    tunnels: Arc<Mutex<TunnelChannels>>,
 }
 
-impl Tunnel {
+impl ExternalListener {
     fn new(
         remote_port: u16,
-        to_tunnels: Arc<Mutex<Tunnels>>,
-        to_client: mpsc::Sender<stnet::Datagram>,
+        tunnels: Arc<Mutex<TunnelChannels>>,
+        to_client: mpsc::Sender<stnet::RedirectorFrame>,
     ) -> Self {
-        Tunnel {
+        ExternalListener {
             remote_port,
-            to_tunnels,
+            tunnels,
             to_client,
         }
     }
     async fn run(&mut self) -> Result<()> {
-        let a_listener = tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
+        let external_listener = tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
         loop {
-            let (a_stream, a_addr) = a_listener.accept().await?;
-            info!(port = self.remote_port, a_addr = ?a_addr, "incoming connection");
+            let (external_stream, external_addr) = external_listener.accept().await?;
+            info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
 
-            let (to_tunnel, from_client) = mpsc::channel::<stnet::Datagram>(32);
+            let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
             {
-                let mut tunnels = self.to_tunnels.lock().unwrap();
-                tunnels.insert(a_addr, to_tunnel);
+                let mut tunnels = self.tunnels.lock().unwrap();
+                tunnels.insert(external_addr, to_tunnel);
             }
 
             let port = self.remote_port;
             let to_client = self.to_client.clone();
-            let to_tunnels = self.to_tunnels.clone();
+            let tunnels = self.tunnels.clone();
             tokio::spawn(async move {
-                trace!(addr = ?a_addr, "Tunnel handler start");
-                let mut h = TunnelHandler::new(a_addr, port, a_stream, to_client, from_client);
+                trace!(addr = ?external_addr, "Tunnel handler start");
+                let mut h = Redirector::new(external_addr, port, external_stream, to_client, from_client);
                 if let Err(e) = h.run().await {
-                    error!(cause = ?e, port = port, addr = ?a_addr, "error redirecting");
+                    error!(cause = ?e, port = port, addr = ?external_addr, "error redirecting");
                 }
-                let mut tunnels = to_tunnels.lock().unwrap();
-                tunnels.remove(&a_addr);
-                trace!(addr = ?a_addr, "Tunnel handler end");
+                let mut tunnels = tunnels.lock().unwrap();
+                tunnels.remove(&external_addr);
+                trace!(addr = ?external_addr, "Tunnel handler end");
             });
         }
     }
 }
-
-type ActiveTunnels = HashSet<u16>;

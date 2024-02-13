@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tunnel {
@@ -21,6 +22,7 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
+    /// Lookup `local_port` for a given `remote_port`
     pub fn local_port(&self, remote_port: u16) -> Option<u16> {
         for t in &self.tunnels {
             if t.remote_port == remote_port {
@@ -34,6 +36,7 @@ impl ClientConfig {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Crypto {
     pub key: PathBuf,
+    pub cert: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -86,8 +89,20 @@ pub fn load_client_config(config: &Path) -> ClientConfig {
         Err(e) => panic!("Failed to parse config file '{:?}'.\n{}", config, e),
     };
 
-    if c.psk.len() > 512 {
-        panic!("psk must not be longer than 512 bytes");
+    if c.psk.len() > 512 || c.psk.is_empty() {
+        panic!("psk length must be [0, 512] bytes");
+    }
+    if c.addr.is_empty() {
+        panic!("addr must not be empty");
+    }
+
+    let mut temp = HashSet::new();
+    for t in &c.tunnels {
+        if temp.contains(&t.remote_port) {
+            panic!("Configuration file contains duplicate remote_ports.");
+
+        }
+        temp.insert(t.remote_port);
     }
 
     c

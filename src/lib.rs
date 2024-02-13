@@ -1,12 +1,13 @@
 pub mod config;
+pub mod net;
+
+mod string;
 
 pub mod client;
 pub mod server;
-pub mod tunnel;
+pub mod redirector;
 
-pub mod net;
-
+pub(crate) type StdResult<T, U> = std::result::Result<T, U>;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = StdResult<T, net::Error>;
 
-mod string;

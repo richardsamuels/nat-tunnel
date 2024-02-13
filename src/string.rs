@@ -1,7 +1,9 @@
-// from https://stackoverflow.com/a/74483246
+// Bassed on code from https://stackoverflow.com/a/74483246
 use serde::{de, ser};
 use std::ops::Deref;
 
+/// Provides a wrapper around String that serde will refuse to deserialize
+/// if the string will be longer than MAX_LENGTH
 #[derive(Debug)]
 pub struct LimitedString<const MAX_LENGTH: usize>(pub String);
 
@@ -14,6 +16,12 @@ impl<const MAX_LENGTH: usize> std::convert::From<String> for LimitedString<MAX_L
 impl<const MAX_LENGTH: usize> Deref for LimitedString<MAX_LENGTH> {
     type Target = String;
     fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<const MAX_LENGTH: usize> AsRef<str> for LimitedString<MAX_LENGTH> {
+    fn as_ref(&self) -> &str {
         &self.0
     }
 }

@@ -5,8 +5,10 @@ use std::process::exit;
 use tokio::net as tnet;
 use tracing::info;
 
-#[tokio::main]
+//#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    //console_subscriber::init();
     tracing_subscriber::fmt::init();
     let args = config::ServerArgs::parse();
 

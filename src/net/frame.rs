@@ -8,36 +8,47 @@ use tokio::net as tnet;
 use tokio_util::codec;
 
 #[derive(Debug, Deserialize, Serialize)]
+pub enum RedirectorFrame {
+    Datagram(Datagram),
+    KillListener(SocketAddr),
+}
+
+impl RedirectorFrame {
+    pub fn id(&self) -> &SocketAddr {
+        match self {
+            RedirectorFrame::Datagram(d) => &d.id,
+            RedirectorFrame::KillListener(id) => &id,
+        }
+    }
+
+}
+impl std::convert::From<Datagram> for RedirectorFrame {
+    fn from(value: Datagram) -> Self {
+        RedirectorFrame::Datagram(value)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub enum Frame {
     Auth(LimitedString<512>),
     Tunnels(Vec<u16>),
-    NewProxy(u16),
-    Datagram(Datagram),
-    Kthxbai,
+    Redirector(RedirectorFrame),
+    Kthxbai, // TODO can be removed?
 }
 
 impl std::convert::From<Datagram> for Frame {
     fn from(value: Datagram) -> Self {
-        Frame::Datagram(value)
+        RedirectorFrame::Datagram(value).into()
     }
 }
 
-pub type FramedLength = tokio_util::codec::Framed<tnet::TcpStream, codec::LengthDelimitedCodec>;
-pub type Framed = tokio_serde::Framed<
-    FramedLength,
-    Frame,
-    Frame,
-    tokio_serde::formats::MessagePack<Frame, Frame>,
->;
-
-fn frame(stream: tnet::TcpStream) -> Framed {
-    let len_codec = codec::LengthDelimitedCodec::new();
-    let len_delimited = codec::Framed::new(stream, len_codec);
-
-    let codec = tokio_serde::formats::MessagePack::default();
-    Framed::new(len_delimited, codec)
+impl std::convert::From<RedirectorFrame> for Frame {
+    fn from(value: RedirectorFrame) -> Self {
+        Frame::Redirector(value)
+    }
 }
 
+/// Represents data that is being shuffled around from Client <-> Server
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Datagram {
     #[serde(rename = "i")]
@@ -48,28 +59,21 @@ pub struct Datagram {
     pub data: Vec<u8>,
 }
 
-/// Represents an authentication request
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Auth {
-    /// Pre-shared key
-    #[serde(rename = "k")]
-    pub psk: LimitedString<512>,
-}
+pub type FramedLength = tokio_util::codec::Framed<tnet::TcpStream, codec::LengthDelimitedCodec>;
+pub type Framed = tokio_serde::Framed<
+    FramedLength,
+    Frame,
+    Frame,
+    tokio_serde::formats::MessagePack<Frame, Frame>,
+>;
 
-impl Auth {
-    pub fn new(psk: String) -> Auth {
-        Auth {
-            psk: LimitedString::<512>(psk),
-        }
-    }
-}
+/// Helper to create correct codecs
+fn frame(stream: tnet::TcpStream) -> Framed {
+    let len_codec = codec::LengthDelimitedCodec::new();
+    let len_delimited = codec::Framed::new(stream, len_codec);
 
-impl std::convert::From<std::string::String> for Auth {
-    fn from(value: std::string::String) -> Self {
-        Auth {
-            psk: LimitedString(value),
-        }
-    }
+    let codec = tokio_serde::formats::MessagePack::default();
+    Framed::new(len_delimited, codec)
 }
 
 pub struct Transport {
@@ -95,7 +99,7 @@ impl Transport {
         }
     }
 
-    pub async fn write_frame(&mut self, t: Frame) -> Result<()> {
+    pub async fn write_frame(&mut self, t: Frame) -> std::result::Result<(), Error> {
         match self.framed.send(t).await {
             Err(e) if reconnectable_err(&e) => {
                 return Err(Error::ConnectionDead);
@@ -107,6 +111,7 @@ impl Transport {
     }
 }
 
+/// List of errors that imply the Client should try to reconnect to the Server
 fn reconnectable_err(err: &futures::io::Error) -> bool {
     use futures::io::ErrorKind::*;
 
@@ -120,7 +125,8 @@ fn reconnectable_err(err: &futures::io::Error) -> bool {
     }
 }
 
-/// Allows setting keepalive on the underlying socket.
+/// Helper to set keepalive on the underlying socket. (Not supported by the
+/// std lib)
 pub fn set_keepalive<T>(stream: &T, keepalive: bool) -> std::io::Result<()>
 where
     T: std::os::fd::AsRawFd,
