@@ -7,6 +7,10 @@ use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+// TODO using 1500 b/c it's the default MTU value on networks.
+// This needs refinement
+const BUFFER_CAPACITY: usize = 1500;
+
 /// Reads data from stream, and send it along the `tx` channel
 /// Reads data from rx chnnale, and send it along the stream
 pub struct Redirector<R, W> {
@@ -27,10 +31,8 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
         rx: mpsc::Receiver<stnet::RedirectorFrame>,
     ) -> Self {
         let (reader, writer) = stream.into_split();
-        // TODO using 1500 b/c it's the default MTU value on networks.
-        // This needs refinement
-        let reader = BufReader::with_capacity(1500, reader);
-        let writer = BufWriter::with_capacity(1500, writer);
+        let reader = BufReader::with_capacity(BUFFER_CAPACITY, reader);
+        let writer = BufWriter::with_capacity(BUFFER_CAPACITY, writer);
 
         Redirector {
             id,
@@ -49,7 +51,7 @@ where
     W: AsyncWrite + std::marker::Unpin,
 {
     pub async fn run(&mut self) -> Result<()> {
-        let mut buf = Vec::new();
+        let mut buf = [0u8; BUFFER_CAPACITY];
         loop {
             tokio::select! {
                 maybe_len = self.reader.read(&mut buf) => {
@@ -67,11 +69,10 @@ where
                     let d = stnet::Datagram {
                         id: self.id,
                         port: self.port,
-                        data: buf,
+                        data: buf[0..len].to_vec(),
                     };
                     self.reader.consume(len);
                     self.tx.send(d.into()).await?;
-                    buf = Vec::new()
                 }
 
                 maybe_data = self.rx.recv() => {
@@ -88,7 +89,7 @@ where
                 }
             }
         }
-
+        self.rx.close();
         Ok(())
     }
 }
@@ -122,14 +123,21 @@ mod tests {
             data: vec![2,2,2,2]
         }.into()).await.unwrap();
         assert!(r.run().await.is_ok());
+        rx.close();
 
         // assert the buffer from read (simulating socket) was sent over the channel
-        let stnet::RedirectorFrame::Datagram(rx) = rx.recv().await.unwrap() else {
+
+        let stnet::RedirectorFrame::Datagram(d) = rx.recv().await.unwrap() else {
             panic!("unexpected");
         };
-        assert_eq!(rx.id, r.id);
-        assert_eq!(rx.port, r.port);
-        assert_eq!(rx.data, read);
+        assert_eq!(d.id, r.id);
+        assert_eq!(d.port, r.port);
+        assert_eq!(d.data, read);
+        let stnet::RedirectorFrame::KillListener(id) = rx.recv().await.unwrap() else {
+            panic!("unexpected");
+        };
+        assert_eq!(id, r.id);
+        assert!(rx.recv().await.is_none());
 
         // assert the datagram was written to write (simulating writing to socket)
         assert_eq!(write, vec![2,2,2,2]);
