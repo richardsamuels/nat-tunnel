@@ -72,3 +72,6 @@ does the same
 * TLS
 * Optimize network packets for ethernet frame size
 * Less sloppy error handling
+* More testing
+* Limit active number of connections
+* Profile and monitor memory consumption

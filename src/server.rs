@@ -1,7 +1,7 @@
 use crate::{config, net as stnet, redirector::redirector, Result};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tracing::{error, info, trace};
@@ -11,7 +11,7 @@ type ActiveTunnels = HashSet<u16>;
 
 pub struct Server {
     listener: tnet::TcpListener,
-    config: Arc<RwLock<config::ServerConfig>>,
+    config: Arc<config::ServerConfig>,
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 }
 
@@ -19,7 +19,7 @@ impl Server {
     pub fn new(config: config::ServerConfig, listener: tnet::TcpListener) -> Self {
         Server {
             listener,
-            config: Arc::new(config.into()),
+            config: config.into(),
             active_tunnels: Arc::new(ActiveTunnels::new().into()),
         }
     }
@@ -50,7 +50,7 @@ impl Server {
 
 struct ClientHandler {
     transport: stnet::Transport,
-    config: Arc<RwLock<config::ServerConfig>>,
+    config: Arc<config::ServerConfig>,
 
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 
@@ -61,7 +61,7 @@ struct ClientHandler {
 
 impl ClientHandler {
     fn new(
-        config: Arc<RwLock<config::ServerConfig>>,
+        config: Arc<config::ServerConfig>,
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
         stream: tnet::TcpStream,
     ) -> ClientHandler {
@@ -88,8 +88,7 @@ impl ClientHandler {
                 _ => return Err(stnet::Error::UnexpectedFrame),
             };
 
-            let c = self.config.read().unwrap();
-            if c.psk != auth.0 {
+            if self.config.psk != auth.0 {
                 // TODO: constant time compare required.
                 return Err(format!("Incorrect PSK from {:?}", addr).into());
             }
