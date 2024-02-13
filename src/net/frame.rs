@@ -17,7 +17,7 @@ impl RedirectorFrame {
     pub fn id(&self) -> &SocketAddr {
         match self {
             RedirectorFrame::Datagram(d) => &d.id,
-            RedirectorFrame::KillListener(id) => &id,
+            RedirectorFrame::KillListener(id) => id,
         }
     }
 
