@@ -1,10 +1,10 @@
-use crate::{config, net as stnet, Result, redirector::Redirector};
+use crate::{config, net as stnet, redirector::Redirector, Result};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tracing::{error, info, trace};
-use std::collections::{HashMap, HashSet};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
 type ActiveTunnels = HashSet<u16>;
@@ -106,17 +106,23 @@ impl ClientHandler {
 
         let bad_tunnels: Vec<_> = {
             let active_tunnels = self.active_tunnels.lock().unwrap();
-            tunnels.iter().filter(|x| active_tunnels.contains(x)).collect()
+            tunnels
+                .iter()
+                .filter(|x| active_tunnels.contains(x))
+                .collect()
         };
 
         if !bad_tunnels.is_empty() {
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
             return Err(format!(
-                    "client sent configuration with remote_port {:?}, which is already in use",
-                    bad_tunnels
-            ).into())
+                "client sent configuration with remote_port {:?}, which is already in use",
+                bad_tunnels
+            )
+            .into());
         }
-        self.transport.write_frame(stnet::Frame::Tunnels(tunnels.clone())).await?; // Ack the config
+        self.transport
+            .write_frame(stnet::Frame::Tunnels(tunnels.clone()))
+            .await?; // Ack the config
 
         Ok(tunnels)
     }
@@ -234,7 +240,8 @@ impl ExternalListener {
         }
     }
     async fn run(&mut self) -> Result<()> {
-        let external_listener = tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
+        let external_listener =
+            tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
         loop {
             let (external_stream, external_addr) = external_listener.accept().await?;
             info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
@@ -250,7 +257,8 @@ impl ExternalListener {
             let tunnels = self.tunnels.clone();
             tokio::spawn(async move {
                 trace!(addr = ?external_addr, "Tunnel handler start");
-                let mut h = Redirector::new(external_addr, port, external_stream, to_client, from_client);
+                let mut h =
+                    Redirector::new(external_addr, port, external_stream, to_client, from_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, addr = ?external_addr, "error redirecting");
                 }

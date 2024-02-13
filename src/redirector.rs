@@ -117,11 +117,16 @@ mod tests {
             writer,
         };
 
-        tx2.send(stnet::Datagram{
-            id: addr,
-            port: 12345,
-            data: vec![2,2,2,2]
-        }.into()).await.unwrap();
+        tx2.send(
+            stnet::Datagram {
+                id: addr,
+                port: 12345,
+                data: vec![2, 2, 2, 2],
+            }
+            .into(),
+        )
+        .await
+        .unwrap();
         assert!(r.run().await.is_ok());
         rx.close();
 
@@ -140,6 +145,6 @@ mod tests {
         assert!(rx.recv().await.is_none());
 
         // assert the datagram was written to write (simulating writing to socket)
-        assert_eq!(write, vec![2,2,2,2]);
+        assert_eq!(write, vec![2, 2, 2, 2]);
     }
 }

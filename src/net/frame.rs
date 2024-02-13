@@ -20,7 +20,6 @@ impl RedirectorFrame {
             RedirectorFrame::KillListener(id) => id,
         }
     }
-
 }
 impl std::convert::From<Datagram> for RedirectorFrame {
     fn from(value: Datagram) -> Self {

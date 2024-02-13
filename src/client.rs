@@ -146,15 +146,15 @@ impl<'a> Client<'a> {
         frame: stnet::RedirectorFrame,
     ) -> std::result::Result<(), stnet::Error> {
         if let stnet::RedirectorFrame::Datagram(ref d) = frame {
-                // Open a tunnel to the internal if needed
-                if !self.to_internal.contains_key(&d.id) {
-                    if let Err(e) = self.new_conn(d).await {
-                        // make sure the Server kills off the connection on its side
-                        let d = stnet::RedirectorFrame::KillListener(d.id);
-                        self.transport.write_frame(d.into()).await?;
-                        return Err(e);
-                    }
+            // Open a tunnel to the internal if needed
+            if !self.to_internal.contains_key(&d.id) {
+                if let Err(e) = self.new_conn(d).await {
+                    // make sure the Server kills off the connection on its side
+                    let d = stnet::RedirectorFrame::KillListener(d.id);
+                    self.transport.write_frame(d.into()).await?;
+                    return Err(e);
                 }
+            }
         }
 
         let to_internal = match self.to_internal.get(frame.id()) {

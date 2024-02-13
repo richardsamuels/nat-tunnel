@@ -1,10 +1,10 @@
 use crate::Result;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
-use std::collections::HashSet;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tunnel {
@@ -100,7 +100,6 @@ pub fn load_client_config(config: &Path) -> ClientConfig {
     for t in &c.tunnels {
         if temp.contains(&t.remote_port) {
             panic!("Configuration file contains duplicate remote_ports.");
-
         }
         temp.insert(t.remote_port);
     }

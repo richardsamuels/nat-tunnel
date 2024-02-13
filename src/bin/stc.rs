@@ -19,8 +19,8 @@ async fn tokio(c: config::ClientConfig) {
             Err(e) => {
                 error!(cause = ?e, addr = addr, "failed to connect to Server");
                 return;
-            },
-            Ok(s) => s
+            }
+            Ok(s) => s,
         };
         let mut client = client::Client::new(&c, client_stream);
 
@@ -39,7 +39,7 @@ async fn tokio(c: config::ClientConfig) {
                 }
             }
         }
-    };
+    }
 }
 
 fn main() {

@@ -83,8 +83,7 @@ port = 12000
     let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
 
     let url = server.url("/");
-    let resp = reqwest::get(url.to_string())
-        .await.unwrap();
+    let resp = reqwest::get(url.to_string()).await.unwrap();
 
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());

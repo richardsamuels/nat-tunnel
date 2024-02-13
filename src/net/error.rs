@@ -20,7 +20,6 @@ impl<T> std::convert::From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(value: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Error::Other(value.to_string())
     }
-
 }
 
 impl std::convert::From<std::string::String> for Error {
