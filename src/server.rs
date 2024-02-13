@@ -1,4 +1,4 @@
-use crate::{config, net as stnet, redirector::Redirector, Result};
+use crate::{config, net as stnet, redirector::redirector, Result};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
@@ -214,13 +214,6 @@ impl ClientHandler {
     }
 }
 
-//impl Drop for ClientHandler {
-//    fn drop(&mut self) {
-//        let mut active_tunnels = self.active_tunnels.lock().unwrap();
-//
-//    }
-//}
-
 struct ExternalListener {
     remote_port: u16,
     to_client: mpsc::Sender<stnet::RedirectorFrame>,
@@ -256,15 +249,11 @@ impl ExternalListener {
             let to_client = self.to_client.clone();
             let tunnels = self.tunnels.clone();
             tokio::spawn(async move {
-                trace!(addr = ?external_addr, "Tunnel handler start");
-                let mut h =
-                    Redirector::new(external_addr, port, external_stream, to_client, from_client);
-                if let Err(e) = h.run().await {
-                    error!(cause = ?e, port = port, addr = ?external_addr, "error redirecting");
-                }
+                trace!(addr = ?external_addr, "Tunnel start");
+                redirector(external_addr, port, external_stream, to_client, from_client).await;
                 let mut tunnels = tunnels.lock().unwrap();
                 tunnels.remove(&external_addr);
-                trace!(addr = ?external_addr, "Tunnel handler end");
+                trace!(addr = ?external_addr, "Tunnel done");
             });
         }
     }

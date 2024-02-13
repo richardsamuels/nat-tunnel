@@ -92,11 +92,9 @@ port = 12000
         Ok(None) => (),
         _ => panic!("sts dead"),
     };
-    sts_h.kill();
 
     match stc_h.try_wait() {
         Ok(None) => (),
         _ => panic!("stc dead"),
     };
-    stc_h.kill();
 }

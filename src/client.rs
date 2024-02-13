@@ -1,4 +1,4 @@
-use crate::{config, net as stnet, net::Frame, redirector::Redirector};
+use crate::{config, net as stnet, net::Frame, redirector::redirector};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net as tnet;
@@ -131,10 +131,7 @@ impl<'a> Client<'a> {
         self.to_internal.insert(d.id, to_internal);
         self.handlers.spawn(async move {
             trace!(addr = ?internal_addr, "Tunnel start");
-            let mut h = Redirector::new(id, port, internal_stream, to_server, from_internal);
-            if let Err(e) = h.run().await {
-                error!(cause = ?e, addr = ?internal_addr, "tunnel experienced error");
-            }
+            let id = redirector(id, port, internal_stream, to_server, from_internal).await;
             trace!(addr = ?internal_addr, "Tunnel done");
             id
         });
