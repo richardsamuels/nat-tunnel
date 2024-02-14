@@ -1,9 +1,10 @@
-use crate::{config, net as stnet, redirector::Redirector, Result};
+use crate::{config::server as config, net as stnet, redirector::Redirector, Result};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
+use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, trace};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
@@ -13,15 +14,30 @@ pub struct Server {
     listener: tnet::TcpListener,
     config: Arc<config::ServerConfig>,
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
+
+    tls: Option<TlsAcceptor>,
 }
 
 impl Server {
-    pub fn new(config: config::ServerConfig, listener: tnet::TcpListener) -> Self {
-        Server {
+    pub fn new(config: config::ServerConfig, listener: tnet::TcpListener) -> Result<Self> {
+        let acceptor = match config.crypto {
+            None => None,
+            Some(ref crypto_paths) => {
+                let crypto = config::ServerCrypto::from_crypto_cfg(crypto_paths)?;
+
+                let tls_config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(crypto.certs, crypto.key)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                Some(TlsAcceptor::from(Arc::new(tls_config)))
+            }
+        };
+        Ok(Server {
             listener,
             config: config.into(),
             active_tunnels: Arc::new(ActiveTunnels::new().into()),
-        }
+            tls: acceptor,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -36,20 +52,33 @@ impl Server {
 
             let c = self.config.clone();
             let active_tunnels = self.active_tunnels.clone();
-            tokio::spawn(async move {
-                trace!(addr = ?addr, "client handler start");
-                let mut h = ClientHandler::new(c, active_tunnels, socket);
-                if let Err(e) = h.run().await {
-                    error!(cause = ?e, addr = ?addr, "client connection dropped");
-                }
-                trace!(addr = ?addr, "client handler end");
-            });
+
+            if let Some(tls) = &self.tls {
+                let socket = tls.accept(socket).await?;
+                tokio::spawn(async move {
+                    trace!(addr = ?addr, "client handler start");
+                    let mut h = ClientHandler::new(c, active_tunnels, socket);
+                    if let Err(e) = h.run().await {
+                        error!(cause = ?e, addr = ?addr, "client connection dropped");
+                    }
+                    trace!(addr = ?addr, "client handler end");
+                });
+            } else {
+                tokio::spawn(async move {
+                    trace!(addr = ?addr, "client handler start");
+                    let mut h = ClientHandler::new(c, active_tunnels, socket);
+                    if let Err(e) = h.run().await {
+                        error!(cause = ?e, addr = ?addr, "client connection dropped");
+                    }
+                    trace!(addr = ?addr, "client handler end");
+                });
+            }
         }
     }
 }
 
-struct ClientHandler {
-    transport: stnet::Transport,
+struct ClientHandler<T> {
+    transport: stnet::Transport<T>,
     config: Arc<config::ServerConfig>,
 
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
@@ -59,12 +88,19 @@ struct ClientHandler {
     to_tunnels: Arc<Mutex<TunnelChannels>>,
 }
 
-impl ClientHandler {
+impl<T> ClientHandler<T>
+where
+    T: tokio::io::AsyncReadExt
+        + tokio::io::AsyncWriteExt
+        + std::marker::Unpin
+        + stnet::PeerAddr
+        + std::os::fd::AsRawFd,
+{
     fn new(
         config: Arc<config::ServerConfig>,
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
-        stream: tnet::TcpStream,
-    ) -> ClientHandler {
+        stream: T,
+    ) -> ClientHandler<T> {
         let (tx, rx) = mpsc::channel(128);
         ClientHandler {
             transport: stnet::Transport::new(stream),
@@ -78,8 +114,7 @@ impl ClientHandler {
 
     /// Validate the client and create external listeners
     async fn auth(&mut self) -> Result<()> {
-        let addr = self.transport.peer_addr()?;
-        info!(addr = ?addr, "accepted connection from client");
+        info!(addr = ?self.transport.peer_addr(), "accepted connection from client");
 
         let frame = self.transport.read_frame().await?;
         {
@@ -90,7 +125,7 @@ impl ClientHandler {
 
             if self.config.psk != auth.0 {
                 // TODO: constant time compare required.
-                return Err(format!("Incorrect PSK from {:?}", addr).into());
+                return Err(format!("Incorrect PSK from {:?}", self.transport.peer_addr()).into());
             }
         }
         self.transport.write_frame(frame).await?; // ack the auth
@@ -156,7 +191,7 @@ impl ClientHandler {
 
     async fn run(&mut self) -> Result<()> {
         if let Err(e) = self.auth().await {
-            error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed to authenticate client");
+            error!(cause = ?e, "failed to authenticate client");
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
         };
         let handlers = self.make_tunnels().await?;

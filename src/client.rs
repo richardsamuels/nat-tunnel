@@ -1,4 +1,4 @@
-use crate::{config, net as stnet, net::Frame, redirector::Redirector};
+use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net as tnet;
@@ -6,9 +6,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
-pub struct Client<'a> {
+pub struct Client<'a, T> {
     config: &'a config::ClientConfig,
-    transport: stnet::Transport,
+    transport: stnet::Transport<T>,
 
     to_server: mpsc::Sender<stnet::RedirectorFrame>,
     from_internal: mpsc::Receiver<stnet::RedirectorFrame>,
@@ -18,8 +18,15 @@ pub struct Client<'a> {
     handlers: JoinSet<SocketAddr>,
 }
 
-impl<'a> Client<'a> {
-    pub fn new(config: &'a config::ClientConfig, stream: tnet::TcpStream) -> Client<'a> {
+impl<'a, T> Client<'a, T>
+where
+    T: tokio::io::AsyncReadExt
+        + tokio::io::AsyncWriteExt
+        + std::marker::Unpin
+        + stnet::PeerAddr
+        + std::os::fd::AsRawFd,
+{
+    pub fn new(config: &'a config::ClientConfig, stream: T) -> Client<'a, T> {
         stnet::set_keepalive(&stream, true)
             .expect("keepalive should have be enabled on stream, but operation failed");
 

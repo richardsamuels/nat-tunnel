@@ -1,11 +1,7 @@
-use crate::net::error::*;
 use crate::string::LimitedString;
-use futures::{SinkExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::vec::Vec;
-use tokio::net as tnet;
-use tokio_util::codec;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum RedirectorFrame {
@@ -58,60 +54,8 @@ pub struct Datagram {
     pub data: Vec<u8>,
 }
 
-pub type FramedLength = tokio_util::codec::Framed<tnet::TcpStream, codec::LengthDelimitedCodec>;
-pub type Framed = tokio_serde::Framed<
-    FramedLength,
-    Frame,
-    Frame,
-    tokio_serde::formats::MessagePack<Frame, Frame>,
->;
-
-/// Helper to create correct codecs
-fn frame(stream: tnet::TcpStream) -> Framed {
-    let len_codec = codec::LengthDelimitedCodec::new();
-    let len_delimited = codec::Framed::new(stream, len_codec);
-
-    let codec = tokio_serde::formats::MessagePack::default();
-    Framed::new(len_delimited, codec)
-}
-
-pub struct Transport {
-    framed: Framed,
-}
-
-impl Transport {
-    pub fn new(stream: tnet::TcpStream) -> Transport {
-        Transport {
-            framed: frame(stream),
-        }
-    }
-
-    pub fn peer_addr(&self) -> std::result::Result<std::net::SocketAddr, std::io::Error> {
-        self.framed.get_ref().get_ref().peer_addr()
-    }
-
-    pub async fn read_frame(&mut self) -> std::result::Result<Frame, Error> {
-        match self.framed.try_next().await {
-            Err(e) => Err(e.into()),
-            Ok(None) => Err(Error::ConnectionDead),
-            Ok(Some(frame)) => Ok(frame),
-        }
-    }
-
-    pub async fn write_frame(&mut self, t: Frame) -> std::result::Result<(), Error> {
-        match self.framed.send(t).await {
-            Err(e) if reconnectable_err(&e) => {
-                return Err(Error::ConnectionDead);
-            }
-            Err(e) => return Err(e.into()),
-            Ok(()) => (),
-        };
-        self.framed.flush().await.map_err(|x| x.into())
-    }
-}
-
 /// List of errors that imply the Client should try to reconnect to the Server
-fn reconnectable_err(err: &futures::io::Error) -> bool {
+pub(super) fn reconnectable_err(err: &futures::io::Error) -> bool {
     use futures::io::ErrorKind::*;
 
     match err.kind() {

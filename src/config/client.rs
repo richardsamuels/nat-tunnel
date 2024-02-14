@@ -1,10 +1,13 @@
 use crate::Result;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
+
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
+use rustls_pemfile::{certs, rsa_private_keys};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tunnel {
@@ -18,7 +21,7 @@ pub struct ClientConfig {
     pub addr: String,
     pub port: u16,
     pub tunnels: Vec<Tunnel>,
-    pub crypto: Option<Crypto>,
+    pub crypto: Option<ClientCryptoConfig>,
 }
 
 impl ClientConfig {
@@ -34,37 +37,51 @@ impl ClientConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Crypto {
+pub struct ClientCryptoConfig {
     pub key: PathBuf,
     pub cert: PathBuf,
+    pub ca: Option<PathBuf>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ServerConfig {
-    pub psk: String,
-    pub port: u16,
-    pub crypto: Option<Crypto>,
+#[derive(Debug)]
+pub struct ClientCrypto {
+    pub key: PrivateKeyDer<'static>,
+    pub certs: Vec<CertificateDer<'static>>,
+    pub ca: Vec<CertificateDer<'static>>,
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-pub struct ServerArgs {
-    #[arg(short, long, default_value = "./sts.toml")]
-    pub config: PathBuf,
+impl ClientCrypto {
+    pub fn from_config(cfg: &ClientCryptoConfig) -> Result<ClientCrypto> {
+        Self::new(&cfg.key, &cfg.cert, &cfg.ca)
+    }
 
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-}
+    fn new<P: AsRef<Path>, Q: AsRef<Path>, R: AsRef<Path>>(
+        key: P,
+        cert: Q,
+        ca: &Option<R>,
+    ) -> Result<ClientCrypto> {
+        use std::fs::File;
+        use std::io::BufReader;
 
-pub fn load_server_config(config: &Path) -> ServerConfig {
-    let config_contents = match read_to_string(config) {
-        Ok(args) => args,
-        Err(e) => panic!("Failed to read config file '{:?}'. Error: {}", &config, e),
-    };
+        let key: PrivatePkcs1KeyDer = rsa_private_keys(&mut BufReader::new(File::open(&key)?))
+            .next()
+            .unwrap()
+            .map(Into::into)?;
 
-    match toml::from_str(&config_contents) {
-        Ok(c) => c,
-        Err(e) => panic!("Failed to parse config file '{:?}'.\n{}", config, e),
+        let certs_: Vec<_> = certs(&mut BufReader::new(File::open(&cert)?))
+            .filter_map(|x| x.ok())
+            .collect();
+        let ca_: Vec<_> = match ca {
+            None => Vec::new(),
+            Some(ca) => certs(&mut BufReader::new(File::open(ca)?))
+                .filter_map(|x| x.ok())
+                .collect(),
+        };
+        Ok(ClientCrypto {
+            key: key.into(),
+            certs: certs_,
+            ca: ca_,
+        })
     }
 }
 
@@ -73,9 +90,6 @@ pub fn load_server_config(config: &Path) -> ServerConfig {
 pub struct ClientArgs {
     #[arg(short, long, default_value = "./stc.toml")]
     pub config: PathBuf,
-
-    #[command(subcommand)]
-    pub command: Option<Commands>,
 }
 
 pub fn load_client_config(config: &Path) -> ClientConfig {
@@ -105,13 +119,4 @@ pub fn load_client_config(config: &Path) -> ClientConfig {
     }
 
     c
-}
-
-#[derive(Debug, Clone, Subcommand)]
-pub enum Commands {
-    GenerateKey {},
-}
-
-pub async fn generate_key(_config_file: &Path, _target: &str) -> Result<()> {
-    unimplemented!();
 }
