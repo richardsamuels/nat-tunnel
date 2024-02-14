@@ -6,8 +6,8 @@ use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
-use rustls_pemfile::{certs, rsa_private_keys};
+use rustls::pki_types::CertificateDer;
+use rustls_pemfile::certs;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tunnel {
@@ -38,50 +38,42 @@ impl ClientConfig {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ClientCryptoConfig {
-    pub key: PathBuf,
-    pub cert: PathBuf,
+    #[serde(default = "default_sni_name")]
+    pub sni_name: String,
     pub ca: Option<PathBuf>,
+}
+
+fn default_sni_name() -> String {
+    "127.0.0.1".to_string()
 }
 
 #[derive(Debug)]
 pub struct ClientCrypto {
-    pub key: PrivateKeyDer<'static>,
-    pub certs: Vec<CertificateDer<'static>>,
     pub ca: Vec<CertificateDer<'static>>,
 }
 
 impl ClientCrypto {
     pub fn from_config(cfg: &ClientCryptoConfig) -> Result<ClientCrypto> {
-        Self::new(&cfg.key, &cfg.cert, &cfg.ca)
+        Self::new(&cfg.ca)
     }
 
-    fn new<P: AsRef<Path>, Q: AsRef<Path>, R: AsRef<Path>>(
-        key: P,
-        cert: Q,
-        ca: &Option<R>,
-    ) -> Result<ClientCrypto> {
+    fn new<P: AsRef<Path> + std::fmt::Debug>(ca: &Option<P>) -> Result<ClientCrypto> {
         use std::fs::File;
         use std::io::BufReader;
 
-        let key: PrivatePkcs1KeyDer = rsa_private_keys(&mut BufReader::new(File::open(&key)?))
-            .next()
-            .unwrap()
-            .map(Into::into)?;
-
-        let certs_: Vec<_> = certs(&mut BufReader::new(File::open(&cert)?))
-            .filter_map(|x| x.ok())
-            .collect();
         let ca_: Vec<_> = match ca {
             None => Vec::new(),
-            Some(ca) => certs(&mut BufReader::new(File::open(ca)?))
-                .filter_map(|x| x.ok())
-                .collect(),
+            Some(ca) => {
+                let ca_fh = File::open(ca).map_err(|e| -> crate::net::Error {
+                    format!("Failed to read CA file {:?}: {}", ca, e).into()
+                })?;
+
+                certs(&mut BufReader::new(ca_fh))
+                    .filter_map(|x| x.ok())
+                    .collect()
+            }
         };
-        Ok(ClientCrypto {
-            key: key.into(),
-            certs: certs_,
-            ca: ca_,
-        })
+        Ok(ClientCrypto { ca: ca_ })
     }
 }
 

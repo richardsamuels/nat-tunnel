@@ -17,7 +17,7 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
       - run: cargo fmt --check
-      - run: cargo clippy
+      - run: cargo clippy --no-deps
       - name: Upload stc
         uses: actions/upload-artifact@v4
         with:

@@ -35,6 +35,8 @@ impl std::ops::DerefMut for ChildGuard {
 
 #[tokio::test]
 async fn integration() {
+    // XXX Hey, if it's 2026 and this test is failing, it's because the
+    // certificate in the tests folder has expired
     let server = Server::run();
     server.expect(
         Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
@@ -48,6 +50,9 @@ psk = \"abcd\"
 addr = \"127.0.0.1\"
 port = 12000
 
+[crypto]
+ca = \"tests/ca.pem\"
+
 [[tunnels]]
 remote_port = 10000
 local_port = {}
@@ -58,6 +63,10 @@ local_port = {}
     let sts_cfg = "
 psk = \"abcd\"
 port = 12000
+
+[crypto]
+key = \"tests/server.key.pem\"
+cert = \"tests/server.crt.pem\"
 "
     .to_string();
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

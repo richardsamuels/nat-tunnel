@@ -1,2 +1,6 @@
 psk = "abcd"
 port = 12345
+
+[crypto]
+key = "tests/server.key.pem"
+cert = "tests/server.crt.pem"

@@ -5,7 +5,7 @@ use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, rsa_private_keys};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -51,21 +51,29 @@ impl ServerCrypto {
         Self::new(&cfg.key, &cfg.cert)
     }
 
-    fn new<P: AsRef<Path>, Q: AsRef<Path>>(key: P, cert: Q) -> Result<ServerCrypto> {
+    fn new<P: AsRef<Path>, Q: AsRef<Path> + std::fmt::Debug>(
+        key: P,
+        cert: Q,
+    ) -> Result<ServerCrypto> {
         use std::fs::File;
         use std::io::BufReader;
 
-        let key: PrivatePkcs1KeyDer = rsa_private_keys(&mut BufReader::new(File::open(&key)?))
-            .next()
-            .unwrap()
-            .map(Into::into)?;
+        let cert_fh = File::open(&cert).map_err(|e| -> crate::net::Error {
+            format!("failed to load key file {:?}: {}", cert, e).into()
+        })?;
 
-        let certs_: Vec<_> = certs(&mut BufReader::new(File::open(&cert)?))
+        let certs_: Vec<_> = certs(&mut BufReader::new(cert_fh))
             .filter_map(|x| x.ok())
             .collect();
-        Ok(ServerCrypto {
-            key: key.into(),
-            certs: certs_,
-        })
+
+        let key_fh = File::open(&key).map_err(|e| -> crate::net::Error {
+            format!("failed to load key file: {}", e).into()
+        })?;
+        let key = rsa_private_keys(&mut BufReader::new(key_fh))
+            .next()
+            .expect("invalid private key. (Convert your key with: openssl rsa -in your.key -out new.key -traditional)")
+            .map(Into::into)?;
+
+        Ok(ServerCrypto { key, certs: certs_ })
     }
 }
