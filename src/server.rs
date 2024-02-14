@@ -155,7 +155,8 @@ impl ClientHandler {
     }
 
     async fn run(&mut self) -> Result<()> {
-        if self.auth().await.is_err() {
+        if let Err(e) = self.auth().await {
+            error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed to authenticate client");
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
         };
         let handlers = self.make_tunnels().await?;
