@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{error, info, trace};
+use tracing::{error, info};
 
 pub struct Client<'a> {
     config: &'a config::ClientConfig,
@@ -130,11 +130,9 @@ impl<'a> Client<'a> {
         let (to_internal, from_internal) = mpsc::channel(16);
         self.to_internal.insert(d.id, to_internal);
         self.handlers.spawn(async move {
-            trace!(addr = ?internal_addr, "Tunnel start");
             let mut r =
                 Redirector::with_stream(id, port, internal_stream, to_server, from_internal);
-            let id = r.run().await;
-            trace!(addr = ?internal_addr, "Tunnel done");
+            let _ = r.run().await;
             id
         });
         Ok(())

@@ -249,7 +249,6 @@ impl ExternalListener {
             let to_client = self.to_client.clone();
             let tunnels = self.tunnels.clone();
             tokio::spawn(async move {
-                trace!(addr = ?external_addr, "Tunnel start");
                 let mut r = Redirector::with_stream(
                     external_addr,
                     port,
