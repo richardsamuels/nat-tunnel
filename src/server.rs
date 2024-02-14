@@ -54,6 +54,7 @@ impl Server {
             let active_tunnels = self.active_tunnels.clone();
 
             if let Some(tls) = &self.tls {
+                info!("TLS enabled. All connections to Clients will be encrypted.");
                 let socket = tls.accept(socket).await?;
                 tokio::spawn(async move {
                     trace!(addr = ?addr, "client handler start");

@@ -41,7 +41,6 @@ async fn run(
     };
 
     if let Some(ref crypto_cfg) = crypto_cfg {
-        info!("Using TLS for connection");
         let domain =
             rustls::pki_types::ServerName::try_from(c.crypto.as_ref().unwrap().sni_name.clone())
                 .map_err(|_| {
@@ -56,7 +55,7 @@ async fn run(
             .await
             .expect("TLS initialization failed");
 
-        info!("TLS enabled. All connections to clients will be encrypted.");
+        info!("TLS enabled. All connections to the Server will be encrypted.");
         let mut client = client::Client::new(c, client_stream);
         client.run().await
     } else {

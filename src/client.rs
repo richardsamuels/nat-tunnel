@@ -100,7 +100,9 @@ where
                                 error!(cause = ?e, "redirector failed");
                             }
                         }
-                        _ => unreachable!(),
+                        f => {
+                            info!(frame = ?f, "received unexpected frame");
+                        }
                     }
                 }
 
