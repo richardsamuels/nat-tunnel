@@ -1,4 +1,4 @@
-use crate::{config, net as stnet, redirector::redirector, Result};
+use crate::{config, net as stnet, redirector::Redirector, Result};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -249,7 +249,14 @@ impl ExternalListener {
             let tunnels = self.tunnels.clone();
             tokio::spawn(async move {
                 trace!(addr = ?external_addr, "Tunnel start");
-                redirector(external_addr, port, external_stream, to_client, from_client).await;
+                let mut r = Redirector::with_stream(
+                    external_addr,
+                    port,
+                    external_stream,
+                    to_client,
+                    from_client,
+                );
+                let _ = r.run().await;
                 let mut tunnels = tunnels.lock().unwrap();
                 tunnels.remove(&external_addr);
                 trace!(addr = ?external_addr, "Tunnel done");
