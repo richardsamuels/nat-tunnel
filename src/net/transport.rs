@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio_util::codec;
 
-pub type FramedLength<T> = tokio_util::codec::Framed<T, codec::BytesCodec>;
+pub type FramedLength<T> = tokio_util::codec::Framed<T, codec::LengthDelimitedCodec>;
 pub type Framed<T> = tokio_serde::Framed<
     FramedLength<T>,
     Frame,
@@ -18,7 +18,7 @@ fn frame<T>(stream: T) -> Framed<T>
 where
     T: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + std::marker::Unpin + PeerAddr,
 {
-    let bytes_codec = codec::BytesCodec::new();
+    let bytes_codec = codec::LengthDelimitedCodec::new();
     let bytes_frame = codec::Framed::new(stream, bytes_codec);
 
     let msgpack_codec = tokio_serde::formats::MessagePack::default();
@@ -37,6 +37,10 @@ where
         Transport {
             framed: frame(stream),
         }
+    }
+
+    pub async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.framed.get_mut().get_mut().shutdown().await
     }
 
     pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {

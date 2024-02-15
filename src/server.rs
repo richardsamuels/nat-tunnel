@@ -5,21 +5,27 @@ use std::sync::{Arc, Mutex};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
 type ActiveTunnels = HashSet<u16>;
 
 pub struct Server {
-    listener: tnet::TcpListener,
     config: Arc<config::Config>,
+    token: CancellationToken,
+    listener: tnet::TcpListener,
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 
     tls: Option<TlsAcceptor>,
 }
 
 impl Server {
-    pub fn new(config: config::Config, listener: tnet::TcpListener) -> Result<Self> {
+    pub fn new(
+        config: config::Config,
+        token: CancellationToken,
+        listener: tnet::TcpListener,
+    ) -> Result<Self> {
         let acceptor = match config.crypto {
             None => None,
             Some(ref crypto_paths) => {
@@ -33,8 +39,9 @@ impl Server {
             }
         };
         Ok(Server {
-            listener,
             config: config.into(),
+            token,
+            listener,
             active_tunnels: Arc::new(ActiveTunnels::new().into()),
             tls: acceptor,
         })
@@ -52,6 +59,7 @@ impl Server {
 
             let c = self.config.clone();
             let active_tunnels = self.active_tunnels.clone();
+            let token = self.token.clone();
 
             if let Some(tls) = &self.tls {
                 info!("TLS enabled. All connections to Clients will be encrypted.");
@@ -64,7 +72,7 @@ impl Server {
                 };
                 tokio::spawn(async move {
                     trace!(addr = ?addr, "client handler start");
-                    let mut h = ClientHandler::new(c, active_tunnels, socket);
+                    let mut h = ClientHandler::new(c, token, active_tunnels, socket);
                     if let Err(e) = h.run().await {
                         error!(cause = ?e, addr = ?addr, "client connection dropped");
                     }
@@ -73,7 +81,7 @@ impl Server {
             } else {
                 tokio::spawn(async move {
                     trace!(addr = ?addr, "client handler start");
-                    let mut h = ClientHandler::new(c, active_tunnels, socket);
+                    let mut h = ClientHandler::new(c, token, active_tunnels, socket);
                     if let Err(e) = h.run().await {
                         error!(cause = ?e, addr = ?addr, "client connection dropped");
                     }
@@ -84,9 +92,18 @@ impl Server {
     }
 }
 
-struct ClientHandler<T> {
-    transport: stnet::Transport<T>,
+struct ClientHandler<T>
+where
+    T: tokio::io::AsyncReadExt
+        + tokio::io::AsyncWriteExt
+        + std::marker::Unpin
+        + stnet::PeerAddr
+        + std::os::fd::AsRawFd,
+{
     config: Arc<config::Config>,
+    token: CancellationToken,
+
+    transport: stnet::Transport<T>,
 
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 
@@ -105,12 +122,14 @@ where
 {
     fn new(
         config: Arc<config::Config>,
+        token: CancellationToken,
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
         stream: T,
     ) -> ClientHandler<T> {
         let (tx, rx) = mpsc::channel(128);
         ClientHandler {
             transport: stnet::Transport::new(stream),
+            token,
             active_tunnels,
             config,
             to_tunnels: Arc::new(HashMap::new().into()),
@@ -177,9 +196,10 @@ where
             let to_client = self.to_client.clone();
             let to_tunnels = self.to_tunnels.clone();
             let port = *t;
+            let token = self.token.clone();
             let h = tokio::spawn(async move {
                 trace!(port = ?port, "external listener start");
-                let mut h = ExternalListener::new(port, to_tunnels, to_client);
+                let mut h = ExternalListener::new(port, token, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
@@ -203,12 +223,13 @@ where
         };
         let handlers = self.make_tunnels().await?;
 
-        loop {
+        let ret = loop {
+            // XXX You MUST NOT return in this loop
             tokio::select! {
                 // Redirect data from tunnel to client
                 maybe_rx = self.from_tunnels.recv() => {
                     let rframe = match maybe_rx {
-                        None => break,
+                        None => break Ok(()),
                         Some(data) => data,
                     };
                     self.transport.write_frame(rframe.into()).await?;
@@ -218,10 +239,14 @@ where
                 maybe_frame = self.transport.read_frame() => {
                     trace!(frame = ?maybe_frame, "FRAME");
                     let frame = match maybe_frame {
-                        Err(stnet::Error::ConnectionDead) => break,
+                        Err(stnet::Error::ConnectionDead) => {
+                            error!(addr = ?self.transport.peer_addr(), "connection is dead");
+                            break Err(stnet::Error::ConnectionDead)
+
+                        },
                         Err(e) => {
                             error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed reading frame from network");
-                            break
+                            break Err(e)
                         }
                         Ok(f) => f,
                     };
@@ -237,27 +262,33 @@ where
                             }
                         }
 
-                        stnet::Frame::Kthxbai => break,
+                        stnet::Frame::Kthxbai => break Ok(()),
                         f => {
                             error!(frame = ?f, "unexpected frame");
                         }
                     };
                 }
+
+                _ = self.token.cancelled() => break Ok(())
+            }
+        };
+
+        {
+            let mut active_tunnels = self.active_tunnels.lock().unwrap();
+            info!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
+            for (t, h) in handlers.iter() {
+                h.abort();
+                active_tunnels.remove(t);
             }
         }
-
-        let mut active_tunnels = self.active_tunnels.lock().unwrap();
-        info!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
-        for (t, h) in handlers.iter() {
-            h.abort();
-            active_tunnels.remove(t);
-        }
-        Ok(())
+        self.transport.shutdown().await?;
+        ret
     }
 }
 
 struct ExternalListener {
     remote_port: u16,
+    token: CancellationToken,
     to_client: mpsc::Sender<stnet::RedirectorFrame>,
     tunnels: Arc<Mutex<TunnelChannels>>,
 }
@@ -265,11 +296,13 @@ struct ExternalListener {
 impl ExternalListener {
     fn new(
         remote_port: u16,
+        token: CancellationToken,
         tunnels: Arc<Mutex<TunnelChannels>>,
         to_client: mpsc::Sender<stnet::RedirectorFrame>,
     ) -> Self {
         ExternalListener {
             remote_port,
+            token,
             tunnels,
             to_client,
         }
@@ -278,7 +311,18 @@ impl ExternalListener {
         let external_listener =
             tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
         loop {
-            let (external_stream, external_addr) = external_listener.accept().await?;
+            let (external_stream, external_addr) = tokio::select! {
+                maybe_accept = external_listener.accept() => match maybe_accept{
+                    Err(e) => {
+                        error!(cause = ?e, "failed to accept client");
+                        continue
+                    }
+                    Ok(s) => s,
+                },
+
+                _ = self.token.cancelled() => break Ok(()),
+            };
+
             info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
 
             let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
@@ -290,10 +334,12 @@ impl ExternalListener {
             let port = self.remote_port;
             let to_client = self.to_client.clone();
             let tunnels = self.tunnels.clone();
+            let token = self.token.clone();
             tokio::spawn(async move {
                 let mut r = Redirector::with_stream(
                     external_addr,
                     port,
+                    token,
                     external_stream,
                     to_client,
                     from_client,

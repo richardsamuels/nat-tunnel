@@ -2,6 +2,7 @@ use clap::Parser;
 use simple_tunnel::{config::server as config, server, Result};
 use std::net::SocketAddr;
 use tokio::net as tnet;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[tokio::main]
@@ -15,6 +16,12 @@ async fn main() -> Result<()> {
     info!("listening on {}", &addr);
     let listener = tnet::TcpListener::bind(addr).await?;
 
-    let mut transport = server::Server::new(c, listener).unwrap();
-    transport.run().await
+    let token = CancellationToken::new();
+    let mut transport = server::Server::new(c, token.clone(), listener).unwrap();
+
+    tokio::select! {
+        ret = transport.run() => return ret,
+        _ = tokio::signal::ctrl_c() => token.cancel()
+    };
+    Ok(())
 }

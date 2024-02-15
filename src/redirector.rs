@@ -5,6 +5,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
 // TODO using 1500 b/c it's the default MTU value on networks.
@@ -16,6 +17,7 @@ const BUFFER_CAPACITY: usize = 1500;
 pub struct Redirector<R, W> {
     id: SocketAddr,
     port: u16,
+    token: CancellationToken,
     reader: BufReader<R>,
     writer: BufWriter<W>,
     tx: mpsc::Sender<stnet::RedirectorFrame>,
@@ -26,6 +28,7 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
     pub fn with_stream(
         id: SocketAddr,
         port: u16,
+        token: CancellationToken,
         stream: tnet::TcpStream,
         tx: mpsc::Sender<stnet::RedirectorFrame>,
         rx: mpsc::Receiver<stnet::RedirectorFrame>,
@@ -37,6 +40,7 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
         Redirector {
             id,
             port,
+            token,
             tx,
             rx,
             reader,
@@ -53,6 +57,7 @@ where
     pub fn new(
         id: SocketAddr,
         port: u16,
+        token: CancellationToken,
         reader: BufReader<R>,
         writer: BufWriter<W>,
         tx: mpsc::Sender<stnet::RedirectorFrame>,
@@ -61,6 +66,7 @@ where
         Redirector {
             id,
             port,
+            token,
             reader,
             writer,
             tx,
@@ -105,6 +111,8 @@ where
                     self.writer.write_all(&data.data).await?;
                     self.writer.flush().await?;
                 }
+
+                _ = self.token.cancelled() => break,
             }
         }
         self.rx.close();

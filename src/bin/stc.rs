@@ -17,11 +17,15 @@ async fn main() {
         .as_ref()
         .map(|c| crypto_init(c).expect("failed to load cert files"));
 
-    match run(&c, &crypto_cfg).await {
-        Ok(_) => exit(0),
-        e => {
-            error!(cause = ?e, "client has failed. Not restarting");
-            exit(1);
+    tokio::select! {
+        maybe_run = run(&c, &crypto_cfg ) => {
+            match maybe_run {
+                Ok(_) => exit(0),
+                e => {
+                    error!(cause = ?e, "client has failed.");
+                    exit(1);
+                }
+            }
         }
     }
 }

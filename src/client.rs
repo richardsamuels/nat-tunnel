@@ -4,15 +4,16 @@ use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, trace};
 
 pub struct Client<'a, T> {
     config: &'a config::Config,
+    token: CancellationToken,
     transport: stnet::Transport<T>,
 
     to_server: mpsc::Sender<stnet::RedirectorFrame>,
     from_internal: mpsc::Receiver<stnet::RedirectorFrame>,
-
     to_internal: HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>,
 
     handlers: JoinSet<SocketAddr>,
@@ -33,6 +34,7 @@ where
         let (tx, rx) = mpsc::channel(16);
         Client {
             config,
+            token: CancellationToken::new(),
             transport: stnet::Transport::new(stream),
             handlers: JoinSet::new(),
             to_server: tx,
@@ -69,7 +71,7 @@ where
 
     pub async fn run(&mut self) -> std::result::Result<(), stnet::Error> {
         self.push_tunnel_config().await?;
-        loop {
+        let ret = loop {
             tokio::select! {
                 // A tunnel has completed it's redirection
                 maybe_join = self.handlers.join_next() => {
@@ -86,22 +88,23 @@ where
                     let frame = match maybe_frame {
                         Err(e) => {
                             error!(cause = ?e, "failed to read");
-                            return Err(e);
+                            break Err(e);
                         }
                         Ok(s) => s,
                     };
 
                     match frame {
                         Frame::Kthxbai => {
-                            return Ok(());
+                            break Ok(());
                         }
                         Frame::Redirector(r) => {
                             if let Err(e) = self.try_datagram(r).await {
-                                error!(cause = ?e, "redirector failed");
+                                error!(cause = ?e, addr = ?self.transport.peer_addr(), "redirector failed");
                             }
                         }
                         f => {
-                            info!(frame = ?f, "received unexpected frame");
+                            info!(addr = ?self.transport.peer_addr(), "received unexpected frame");
+                            trace!(frame = ?f, addr = ?self.transport.peer_addr(), "FRAME");
                         }
                     }
                 }
@@ -112,10 +115,15 @@ where
                         None => continue,
                         Some(d) => d,
                     };
-                    self.transport.write_frame(data.into()).await?;
+                    if let Err(e) = self.transport.write_frame(data.into()).await {
+                        error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed to write frame");
+                        break Err(e);
+                    };
                 }
             }
-        }
+        };
+        self.transport.shutdown().await?;
+        ret
     }
 
     async fn new_conn(&mut self, d: &stnet::Datagram) -> std::result::Result<(), stnet::Error> {
@@ -139,11 +147,12 @@ where
         let id = d.id;
         let port = d.port;
         let to_server = self.to_server.clone();
+        let token = self.token.clone();
         let (to_internal, from_internal) = mpsc::channel(16);
         self.to_internal.insert(d.id, to_internal);
         self.handlers.spawn(async move {
             let mut r =
-                Redirector::with_stream(id, port, internal_stream, to_server, from_internal);
+                Redirector::with_stream(id, port, token, internal_stream, to_server, from_internal);
             let _ = r.run().await;
             id
         });
