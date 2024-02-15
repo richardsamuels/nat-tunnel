@@ -36,15 +36,12 @@ impl std::ops::DerefMut for ChildGuard {
     }
 }
 
-async fn setup(addr: &SocketAddr) -> (PathBuf, PathBuf) {
-    let stc_cfg = format!(
+async fn setup(addr: &SocketAddr, skip_tls: bool) -> (PathBuf, PathBuf) {
+    let mut stc_cfg = format!(
         "
 psk = \"abcd\"
 addr = \"127.0.0.1\"
 port = 12000
-
-[crypto]
-ca = \"tests/ca.pem\"
 
 [[tunnels]]
 remote_port = 10000
@@ -53,15 +50,31 @@ local_port = {}
         addr.port()
     );
 
-    let sts_cfg = "
+    if !skip_tls {
+        stc_cfg.push_str(
+            "
+[crypto]
+ca = \"tests/ca.pem\"
+",
+        );
+    }
+
+    let mut sts_cfg = "
 psk = \"abcd\"
 port = 12000
+"
+    .to_string();
 
+    if !skip_tls {
+        sts_cfg.push_str(
+            "
 [crypto]
 key = \"tests/server.key.pem\"
 cert = \"tests/server.crt.pem\"
-"
-    .to_string();
+",
+        );
+    }
+
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     d.push("tests");
 
@@ -113,7 +126,45 @@ async fn integration() {
     );
 
     let addr = server.addr();
-    let (sts_path, stc_path) = setup(&addr).await;
+    let (sts_path, stc_path) = setup(&addr, false).await;
+
+    let mut sts = test_bin::get_test_bin("sts");
+    let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+
+    // wait until we can connect to the server
+    let addr = "127.0.0.1:12000".parse().unwrap();
+    wait_for_server(&addr).await;
+
+    let mut stc = test_bin::get_test_bin("stc");
+    let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
+
+    let url = server.url("/");
+    let resp = reqwest::get(url.to_string()).await.unwrap();
+
+    // assert the response has a 200 status code.
+    assert!(resp.status().is_success());
+
+    match sts_h.try_wait() {
+        Ok(None) => (),
+        _ => panic!("sts dead"),
+    };
+
+    match stc_h.try_wait() {
+        Ok(None) => (),
+        _ => panic!("stc dead"),
+    };
+}
+
+#[tokio::test]
+async fn integration_no_tls() {
+    let _guard = MTX.lock();
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
+    );
+
+    let addr = server.addr();
+    let (sts_path, stc_path) = setup(&addr, true).await;
 
     let mut sts = test_bin::get_test_bin("sts");
     let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
@@ -147,7 +198,7 @@ async fn integration_client_failure() {
     let _guard = MTX.lock();
     // Client failure MUST NOT crash server
     let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
-    let (sts_path, stc_path) = setup(&addr).await;
+    let (sts_path, stc_path) = setup(&addr, false).await;
 
     let mut sts = test_bin::get_test_bin("sts");
     let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
@@ -172,7 +223,7 @@ async fn integration_server_failure() {
     let _guard = MTX.lock();
     // Server failure MUST trigger client shutdown
     let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
-    let (sts_path, stc_path) = setup(&addr).await;
+    let (sts_path, stc_path) = setup(&addr, false).await;
 
     let mut sts = test_bin::get_test_bin("sts");
     let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
