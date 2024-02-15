@@ -1,8 +1,11 @@
 use httptest::{matchers::*, responders::*, Expectation, Server};
 use std::fs::File;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Child;
+use tokio::net::TcpStream;
+use tokio::time::{sleep, Duration};
 
 struct ChildGuard(Child);
 
@@ -33,17 +36,7 @@ impl std::ops::DerefMut for ChildGuard {
     }
 }
 
-#[tokio::test]
-async fn integration() {
-    // XXX Hey, if it's 2026 and this test is failing, it's because the
-    // certificate in the tests folder has expired
-    let server = Server::run();
-    server.expect(
-        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
-    );
-
-    let addr = server.addr();
-
+async fn setup(addr: &SocketAddr) -> (PathBuf, PathBuf) {
     let stc_cfg = format!(
         "
 psk = \"abcd\"
@@ -85,8 +78,49 @@ cert = \"tests/server.crt.pem\"
         let _ = sts_f.write_all(sts_cfg.as_bytes());
     }
 
+    (sts_path, stc_path)
+}
+
+static MTX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+async fn wait_for_server(addr: &SocketAddr) {
+    let mut tries = 5;
+    loop {
+        if tries == 0 {
+            panic!(
+                "Tried to connect, but failed. Did the server ever come up? {:?}",
+                addr
+            );
+        }
+        let c = TcpStream::connect(addr).await;
+        if c.is_err() {
+            sleep(Duration::from_millis(100)).await;
+        } else {
+            break;
+        }
+        tries -= 1
+    }
+}
+
+// XXX Hey, if it's 2026 or later and these tests are failing, it's because the
+// certificate in the tests folder has expired
+#[tokio::test]
+async fn integration() {
+    let _guard = MTX.lock();
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
+    );
+
+    let addr = server.addr();
+    let (sts_path, stc_path) = setup(&addr).await;
+
     let mut sts = test_bin::get_test_bin("sts");
     let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+
+    // wait until we can connect to the server
+    let addr = "127.0.0.1:12000".parse().unwrap();
+    wait_for_server(&addr).await;
 
     let mut stc = test_bin::get_test_bin("stc");
     let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
@@ -105,5 +139,55 @@ cert = \"tests/server.crt.pem\"
     match stc_h.try_wait() {
         Ok(None) => (),
         _ => panic!("stc dead"),
+    };
+}
+
+#[tokio::test]
+async fn integration_client_failure() {
+    let _guard = MTX.lock();
+    // Client failure MUST NOT crash server
+    let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
+    let (sts_path, stc_path) = setup(&addr).await;
+
+    let mut sts = test_bin::get_test_bin("sts");
+    let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+
+    let addr = "127.0.0.1:12000".parse().unwrap();
+    wait_for_server(&addr).await;
+
+    let mut stc = test_bin::get_test_bin("stc");
+    let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
+
+    stc_h.kill().unwrap();
+    let _ = stc_h.wait().unwrap();
+
+    match sts_h.try_wait() {
+        Ok(None) => (), // still running
+        _ => panic!("sts dead"),
+    };
+}
+
+#[tokio::test]
+async fn integration_server_failure() {
+    let _guard = MTX.lock();
+    // Server failure MUST trigger client shutdown
+    let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
+    let (sts_path, stc_path) = setup(&addr).await;
+
+    let mut sts = test_bin::get_test_bin("sts");
+    let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+
+    let addr = "127.0.0.1:12000".parse().unwrap();
+    wait_for_server(&addr).await;
+
+    let mut stc = test_bin::get_test_bin("stc");
+    let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
+
+    sts_h.kill().unwrap();
+    let _ = stc_h.wait();
+
+    match stc_h.try_wait() {
+        Ok(Some(_)) => (),
+        _ => panic!("stc still alive"),
     };
 }

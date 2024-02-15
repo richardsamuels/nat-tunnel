@@ -55,7 +55,13 @@ impl Server {
 
             if let Some(tls) = &self.tls {
                 info!("TLS enabled. All connections to Clients will be encrypted.");
-                let socket = tls.accept(socket).await?;
+                let socket = match tls.accept(socket).await {
+                    Err(e) => {
+                        error!(cause = ?e, addr = ?addr, "client connection dropped");
+                        continue;
+                    }
+                    Ok(socket) => socket,
+                };
                 tokio::spawn(async move {
                     trace!(addr = ?addr, "client handler start");
                     let mut h = ClientHandler::new(c, active_tunnels, socket);
