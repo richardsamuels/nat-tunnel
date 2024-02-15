@@ -38,6 +38,8 @@ ca = "ca.pem"
 [[tunnels]]
 # The port to open on the Server. Must be unique for each Server
 remote_port = 6000
+# optional param to specify the hostname/ip of the Internal service
+# local_hostname = "127.0.0.1" # defaults to 127.0.0.1
 # When a connection to the Server on remote_port is opened, data will be
 # redirected to this port on the client
 local_port = 8000

@@ -124,7 +124,7 @@ where
             Some(p) => p,
         };
         let internal_addr: SocketAddr =
-            format!("{}:{}", tunnel_cfg.hostname, tunnel_cfg.local_port)
+            format!("{}:{}", tunnel_cfg.local_hostname, tunnel_cfg.local_port)
                 .parse()
                 .unwrap();
         info!(internal_addr = ?internal_addr, for_ = ?d.id, "connecting to Internal");

@@ -13,7 +13,7 @@ use rustls_pemfile::certs;
 pub struct Tunnel {
     pub remote_port: u16,
     #[serde(default = "localhost_ipv4")]
-    pub hostname: String,
+    pub local_hostname: String,
     pub local_port: u16,
 }
 
