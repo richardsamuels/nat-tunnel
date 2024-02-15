@@ -119,11 +119,14 @@ where
     }
 
     async fn new_conn(&mut self, d: &stnet::Datagram) -> std::result::Result<(), stnet::Error> {
-        let local_port = match self.config.local_port(d.port) {
+        let tunnel_cfg = match self.config.tunnel(d.port) {
             None => return Err(format!("unknown port {}", d.port).into()),
             Some(p) => p,
         };
-        let internal_addr: SocketAddr = format!("127.0.0.1:{}", local_port).parse().unwrap();
+        let internal_addr: SocketAddr =
+            format!("{}:{}", tunnel_cfg.hostname, tunnel_cfg.local_port)
+                .parse()
+                .unwrap();
         info!(internal_addr = ?internal_addr, for_ = ?d.id, "connecting to Internal");
         let internal_stream = match tnet::TcpStream::connect(internal_addr).await {
             Ok(s) => s,

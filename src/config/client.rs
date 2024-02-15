@@ -12,6 +12,8 @@ use rustls_pemfile::certs;
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tunnel {
     pub remote_port: u16,
+    #[serde(default = "localhost_ipv4")]
+    pub hostname: String,
     pub local_port: u16,
 }
 
@@ -26,24 +28,19 @@ pub struct Config {
 
 impl Config {
     /// Lookup `local_port` for a given `remote_port`
-    pub fn local_port(&self, remote_port: u16) -> Option<u16> {
-        for t in &self.tunnels {
-            if t.remote_port == remote_port {
-                return Some(t.local_port);
-            }
-        }
-        None
+    pub fn tunnel(&self, remote_port: u16) -> Option<&Tunnel> {
+        self.tunnels.iter().find(|t| t.remote_port == remote_port)
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CryptoConfig {
-    #[serde(default = "default_sni_name")]
+    #[serde(default = "localhost_ipv4")]
     pub sni_name: String,
     pub ca: Option<PathBuf>,
 }
 
-fn default_sni_name() -> String {
+fn localhost_ipv4() -> String {
     "127.0.0.1".to_string()
 }
 
