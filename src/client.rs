@@ -1,138 +1,180 @@
-use mio::net as mnet;
-use mio::{Events, Interest, Poll, Token};
-use crate::redirector;
-use crate::{config, net as stnet, Result};
+use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector};
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::mpsc;
-use std::io::Write;
+use tokio::net as tnet;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tracing::{error, info};
 
-pub struct Client {
-    poll: mio::Poll,
-    events: mio::Events,
+pub struct Client<'a, T> {
+    config: &'a config::Config,
+    transport: stnet::Transport<T>,
 
-    transport: stnet::NetBuf,
+    to_server: mpsc::Sender<stnet::RedirectorFrame>,
+    from_internal: mpsc::Receiver<stnet::RedirectorFrame>,
+
+    to_internal: HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>,
+
+    handlers: JoinSet<SocketAddr>,
 }
 
-impl Client {
-    pub fn new(stream: mnet::TcpStream) -> Result<Client> {
-        stnet::set_keepalive(&stream, true)?;
-        let poll = Poll::new()?;
+impl<'a, T> Client<'a, T>
+where
+    T: tokio::io::AsyncReadExt
+        + tokio::io::AsyncWriteExt
+        + std::marker::Unpin
+        + stnet::PeerAddr
+        + std::os::fd::AsRawFd,
+{
+    pub fn new(config: &'a config::Config, stream: T) -> Client<'a, T> {
+        stnet::set_keepalive(&stream, true)
+            .expect("keepalive should have be enabled on stream, but operation failed");
 
-        let mut c = Client {
-            poll,
-            events: Events::with_capacity(128),
-            transport: stnet::NetBuf::new(stream),
-        };
-        c.poll.registry().register(
-            &mut c.transport,
-            Token(0),
-            Interest::READABLE | Interest::WRITABLE,
-        )?;
-        Ok(c)
+        let (tx, rx) = mpsc::channel(16);
+        Client {
+            config,
+            transport: stnet::Transport::new(stream),
+            handlers: JoinSet::new(),
+            to_server: tx,
+            from_internal: rx,
+            to_internal: HashMap::new(),
+        }
     }
 
-    pub fn push_tunnel_config(&mut self, c: &config::ClientConfig) -> Result<()> {
-        'outer: loop {
-            self.poll.poll(&mut self.events, None)?;
+    async fn push_tunnel_config(&mut self) -> std::result::Result<(), stnet::Error> {
+        self.transport
+            .write_frame(Frame::Auth(self.config.psk.clone().into()))
+            .await?;
 
-            for ev in &self.events {
-                if ev.token() == Token(0) && ev.is_writable() {
-                    match self.transport.stream().peer_addr() {
-                        Err(err)
-                            if err.kind() == std::io::ErrorKind::NotConnected
-                                || err.raw_os_error() == Some(libc::EINPROGRESS) =>
-                        {
-                            continue;
-                        }
-                        Err(e) => return Err(e.into()),
-                        Ok(_) => (),
-                    };
+        let frame = self.transport.read_frame().await?;
+        let stnet::Frame::Auth(_) = frame else {
+            return Err(stnet::Error::ConnectionRefused);
+        };
 
-                    let auth = stnet::Auth::new(c.psk.clone());
-                    self.transport.write(&auth)?;
-                    self.transport.flush()?;
+        let tunnels = self
+            .config
+            .tunnels
+            .iter()
+            .map(|tunnel| tunnel.remote_port)
+            .collect();
+        self.transport.write_frame(Frame::Tunnels(tunnels)).await?;
 
-                    self.transport.write(&c)?;
-                    self.transport.flush()?;
-                    info!("Pushed tunnel config to remote");
-                    break 'outer;
-                }
-            }
-        }
-
-        self.events.clear();
+        let frame = self.transport.read_frame().await?;
+        let stnet::Frame::Tunnels(_) = frame else {
+            return Err(stnet::Error::ConnectionRefused);
+        };
+        info!("Pushed tunnel config to remote");
         Ok(())
     }
 
-    pub fn run(&mut self, c: &config::ClientConfig, rx: &mpsc::Receiver<()>) -> Result<()> {
+    pub async fn run(&mut self) -> std::result::Result<(), stnet::Error> {
+        self.push_tunnel_config().await?;
         loop {
-            self.poll.poll(&mut self.events, None)?;
-
-            for ev in &self.events {
-                if rx.try_recv().is_ok() {
-                    return Ok(());
+            tokio::select! {
+                // A tunnel has completed it's redirection
+                maybe_join = self.handlers.join_next() => {
+                    let addr = match maybe_join {
+                        None => continue,
+                        Some(Err(_)) => unreachable!(), // TODO
+                        Some(Ok(h)) => h,
+                    };
+                    info!(addr = ?addr, "Cleaned up redirector");
                 }
-                if ev.token() == Token(0) && ev.is_readable() {
-                    loop {
-                        let pd: stnet::PlzDial = match self.transport.read() {
-                            Ok(pd) => pd,
-                            Err(stnet::Error::WouldBlock) => break,
-                            Err(_e) => return Err("connection dead".into()),
-                        };
 
-                        let from_addr: SocketAddr =
-                            format!("{}:{}", &c.addr, &pd.via_port).parse().unwrap();
-                        let local_port: u16 = {
-                            let mut out = 0;
-                            for t in &c.tunnels {
-                                if t.remote_port == pd.remote_port {
-                                    out = t.local_port;
-                                    break;
-                                }
-                            }
-                            out
-                        };
-                        let to_addr: SocketAddr =
-                            format!("127.0.0.1:{}", local_port).parse().unwrap();
-                        info!(dial = ?pd, local_port = local_port, from = ?from_addr, to = ?to_addr, "Received dial request");
-                        let from_stream = match std::net::TcpStream::connect(from_addr) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                error!(cause = ?e, from = ?from_addr, "Failed to connect to remote");
-                                continue;
-                            }
-                        };
-                        let to_stream = match std::net::TcpStream::connect(to_addr) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                error!(cause = ?e, to = ?to_addr, "Failed to connect to b");
-                                continue;
-                            }
-                        };
-                        from_stream.set_nonblocking(true)?;
-                        let from_stream = mnet::TcpStream::from_std(from_stream);
-                        to_stream.set_nonblocking(true)?;
-                        let to_stream = mnet::TcpStream::from_std(to_stream);
+                // Client receives a frame from Server
+                maybe_frame = self.transport.read_frame() => {
+                    let frame = match maybe_frame {
+                        Err(e) => {
+                            error!(cause = ?e, "failed to read");
+                            return Err(e);
+                        }
+                        Ok(s) => s,
+                    };
 
-                        // TODO auth
-                        //let mut transport = net::NetBuf::new(from_stream);
-                        //let auth: net::Auth = net::Auth::new(c.psk.clone());
-                        //transport.write(&auth)?;
-                        //transport.flush()?;
-                        //std::thread::spawn(|| redirector::redirector(transport.eject(), to_stream));
-                        std::thread::spawn(|| redirector::redirector(from_stream, to_stream));
+                    match frame {
+                        Frame::Kthxbai => {
+                            return Ok(());
+                        }
+                        Frame::Redirector(r) => {
+                            if let Err(e) = self.try_datagram(r).await {
+                                error!(cause = ?e, "redirector failed");
+                            }
+                        }
+                        f => {
+                            info!(frame = ?f, "received unexpected frame");
+                        }
                     }
+                }
+
+                // We have some data to send from a tunnel to the client
+                maybe_recv = self.from_internal.recv() => {
+                    let data = match maybe_recv {
+                        None => continue,
+                        Some(d) => d,
+                    };
+                    self.transport.write_frame(data.into()).await?;
                 }
             }
         }
     }
-}
 
-impl std::ops::Drop for Client {
-    fn drop(&mut self) {
-        let bai = stnet::Kthxbai {};
-        let _ = self.transport.write(&bai);
-        info!("Closing connection to remote");
+    async fn new_conn(&mut self, d: &stnet::Datagram) -> std::result::Result<(), stnet::Error> {
+        let tunnel_cfg = match self.config.tunnel(d.port) {
+            None => return Err(format!("unknown port {}", d.port).into()),
+            Some(p) => p,
+        };
+        let internal_addr: SocketAddr =
+            format!("{}:{}", tunnel_cfg.local_hostname, tunnel_cfg.local_port)
+                .parse()
+                .unwrap();
+        info!(internal_addr = ?internal_addr, for_ = ?d.id, "connecting to Internal");
+        let internal_stream = match tnet::TcpStream::connect(internal_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!(cause = ?e, addr = ?internal_addr, for_ = ?d.id, "Failed to connect to Internal");
+                return Err(e.into());
+            }
+        };
+
+        let id = d.id;
+        let port = d.port;
+        let to_server = self.to_server.clone();
+        let (to_internal, from_internal) = mpsc::channel(16);
+        self.to_internal.insert(d.id, to_internal);
+        self.handlers.spawn(async move {
+            let mut r =
+                Redirector::with_stream(id, port, internal_stream, to_server, from_internal);
+            let _ = r.run().await;
+            id
+        });
+        Ok(())
+    }
+
+    async fn try_datagram(
+        &mut self,
+        frame: stnet::RedirectorFrame,
+    ) -> std::result::Result<(), stnet::Error> {
+        if let stnet::RedirectorFrame::Datagram(ref d) = frame {
+            // Open a tunnel to the internal if needed
+            if !self.to_internal.contains_key(&d.id) {
+                if let Err(e) = self.new_conn(d).await {
+                    // make sure the Server kills off the connection on its side
+                    let d = stnet::RedirectorFrame::KillListener(d.id);
+                    self.transport.write_frame(d.into()).await?;
+                    return Err(e);
+                }
+            }
+        }
+
+        let to_internal = match self.to_internal.get(frame.id()) {
+            None => {
+                error!(id = ?frame.id(),"no channel");
+                return Ok(());
+            }
+            Some(s) => s,
+        };
+        to_internal.send(frame).await?;
+
+        Ok(())
     }
 }

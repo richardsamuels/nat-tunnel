@@ -1,109 +1,114 @@
-use crate::Result;
-use mio::net as mnet;
-use mio::{Events, Interest, Poll, Token};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use tracing::error;
+use crate::{net as stnet, Result};
+use std::net::SocketAddr;
+use tnet::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::net as tnet;
+use tokio::sync::mpsc;
+use tracing::{error, info, trace};
 
-/// Fill buffer of `from` and write its contents to `to`
-fn read_write<T, U>(from: &mut BufReader<T>, to: &mut BufWriter<U>) -> std::io::Result<usize>
-where
-    T: Read,
-    U: Write,
-{
-    let buf = from.fill_buf()?;
-    let len = buf.len();
-    // len 0 indicates closed sockets
-    if len != 0 {
-        match to.write(buf) {
-            Err(e) => {
-                error!(cause = ?e, "Failed to write");
-                return Err(e);
-            }
-            Ok(_) => {
-                from.consume(len);
-                to.flush()?;
-            }
-        };
-    }
-    Ok(len)
+// TODO using 1500 b/c it's the default MTU value on networks.
+// This needs refinement
+const BUFFER_CAPACITY: usize = 1500;
+
+/// Reads data from stream, and send it along the `tx` channel
+/// Reads data from rx chnnale, and send it along the stream
+pub struct Redirector<R, W> {
+    id: SocketAddr,
+    port: u16,
+    reader: BufReader<R>,
+    writer: BufWriter<W>,
+    tx: mpsc::Sender<stnet::RedirectorFrame>,
+    rx: mpsc::Receiver<stnet::RedirectorFrame>,
 }
 
-/// Read all data from left stream and write it to the right stream and vice
-/// versa. Both streams should be connected
-pub fn redirector(
-    mut left_stream: mnet::TcpStream,
-    mut right_stream: mnet::TcpStream,
-) -> Result<()> {
-    use std::io::ErrorKind;
+impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
+    pub fn with_stream(
+        id: SocketAddr,
+        port: u16,
+        stream: tnet::TcpStream,
+        tx: mpsc::Sender<stnet::RedirectorFrame>,
+        rx: mpsc::Receiver<stnet::RedirectorFrame>,
+    ) -> Self {
+        let (reader, writer) = stream.into_split();
+        let reader = BufReader::with_capacity(BUFFER_CAPACITY, reader);
+        let writer = BufWriter::with_capacity(BUFFER_CAPACITY, writer);
 
-    let mut poll = Poll::new()?;
-    poll.registry()
-        .register(&mut left_stream, Token(0), Interest::WRITABLE)?;
-    poll.registry()
-        .register(&mut right_stream, Token(1), Interest::WRITABLE)?;
+        Redirector {
+            id,
+            port,
+            tx,
+            rx,
+            reader,
+            writer,
+        }
+    }
+}
 
-    // Yield for writability on both sockets
-    {
-        let mut writable = [0u8; 2];
-        let mut events = Events::with_capacity(2);
+impl<R, W> Redirector<R, W>
+where
+    R: AsyncRead + std::marker::Unpin,
+    W: AsyncWrite + std::marker::Unpin,
+{
+    pub fn new(
+        id: SocketAddr,
+        port: u16,
+        reader: BufReader<R>,
+        writer: BufWriter<W>,
+        tx: mpsc::Sender<stnet::RedirectorFrame>,
+        rx: mpsc::Receiver<stnet::RedirectorFrame>,
+    ) -> Redirector<R, W> {
+        Redirector {
+            id,
+            port,
+            reader,
+            writer,
+            tx,
+            rx,
+        }
+    }
+    pub async fn run(&mut self) -> Result<()> {
+        trace!(addr = ?self.id, "Tunnel start");
+        let mut buf = [0u8; BUFFER_CAPACITY];
         loop {
-            poll.poll(&mut events, None)?;
-
-            for ev in &events {
-                let token = ev.token();
-                writable[token.0] = 1;
-            }
-            if writable[0] == 1 && writable[1] == 1 {
-                break;
-            }
-        }
-    }
-
-    poll.registry()
-        .reregister(&mut left_stream, Token(0), Interest::READABLE)?;
-    poll.registry()
-        .reregister(&mut right_stream, Token(1), Interest::READABLE)?;
-    // TODO 1500 is the default ethernet payload size, but MTU
-    // can vary so parameterize this
-    let mut left_reader = BufReader::with_capacity(1500, &left_stream);
-    let mut left_writer = BufWriter::with_capacity(1500, &left_stream);
-
-    let mut right_reader = BufReader::with_capacity(1500, &right_stream);
-    let mut right_writer = BufWriter::with_capacity(1500, &right_stream);
-
-    let mut events = Events::with_capacity(128);
-    'outer: loop {
-        poll.poll(&mut events, None)?;
-        for ev in &events {
-            if ev.token() == Token(0) {
-                loop {
-                    match read_write(&mut left_reader, &mut right_writer) {
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                        Ok(0) => {
-                            break 'outer;
-                        }
-                        Ok(_) => (),
+            tokio::select! {
+                maybe_len = self.reader.read(&mut buf) => {
+                    let len = match maybe_len {
                         Err(e) => {
-                            error!(cause = ?e, "failed to redirect from left to right")
-                        }
+                            error!(cause = ?e, "failed to read from network");
+                            break;
+                        },
+                        Ok(l) => l,
+                    };
+                    if len == 0 {
+                        self.tx.send(stnet::RedirectorFrame::KillListener(self.id)).await?;
+                        break
                     }
+                    let d = stnet::Datagram {
+                        id: self.id,
+                        port: self.port,
+                        data: buf[0..len].to_vec(),
+                    };
+                    self.reader.consume(len);
+                    self.tx.send(d.into()).await?;
                 }
-            } else if ev.token() == Token(1) {
-                loop {
-                    match read_write(&mut right_reader, &mut left_writer) {
-                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-                        Ok(0) => {
-                            break 'outer;
+
+                maybe_data = self.rx.recv() => {
+                    let data = match maybe_data {
+                        None => break,
+                        Some(stnet::RedirectorFrame::KillListener(_)) => {
+                            info!(id = ?self.id, "killing listener");
+                            break
                         }
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!(cause = ?e, "failed to redirect from right to left")
-                        }
-                    }
+                        Some(stnet::RedirectorFrame::Datagram(d)) => d,
+                    };
+                    self.writer.write_all(&data.data).await?;
+                    self.writer.flush().await?;
                 }
             }
         }
+        self.rx.close();
+        trace!(addr = ?self.id, "Tunnel end");
+        Ok(())
     }
-
-    Ok(())
 }

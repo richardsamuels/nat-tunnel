@@ -1,1 +1,3 @@
 /target
+*.key
+/tests/*.integration.toml
