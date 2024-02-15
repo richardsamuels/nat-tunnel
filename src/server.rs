@@ -12,18 +12,18 @@ type ActiveTunnels = HashSet<u16>;
 
 pub struct Server {
     listener: tnet::TcpListener,
-    config: Arc<config::ServerConfig>,
+    config: Arc<config::Config>,
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 
     tls: Option<TlsAcceptor>,
 }
 
 impl Server {
-    pub fn new(config: config::ServerConfig, listener: tnet::TcpListener) -> Result<Self> {
+    pub fn new(config: config::Config, listener: tnet::TcpListener) -> Result<Self> {
         let acceptor = match config.crypto {
             None => None,
             Some(ref crypto_paths) => {
-                let crypto = config::ServerCrypto::from_crypto_cfg(crypto_paths)?;
+                let crypto = config::Crypto::from_crypto_cfg(crypto_paths)?;
 
                 let tls_config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
@@ -80,7 +80,7 @@ impl Server {
 
 struct ClientHandler<T> {
     transport: stnet::Transport<T>,
-    config: Arc<config::ServerConfig>,
+    config: Arc<config::Config>,
 
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 
@@ -98,7 +98,7 @@ where
         + std::os::fd::AsRawFd,
 {
     fn new(
-        config: Arc<config::ServerConfig>,
+        config: Arc<config::Config>,
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
         stream: T,
     ) -> ClientHandler<T> {

@@ -9,9 +9,9 @@ use tracing::{error, info};
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    let args = config::ClientArgs::parse();
+    let args = config::Args::parse();
 
-    let c = config::load_client_config(&args.config);
+    let c = config::load_config(&args.config);
     let crypto_cfg = c
         .crypto
         .as_ref()
@@ -27,7 +27,7 @@ async fn main() {
 }
 
 async fn run(
-    c: &config::ClientConfig,
+    c: &config::Config,
     crypto_cfg: &Option<Arc<rustls::ClientConfig>>,
 ) -> stnet::Result<()> {
     let addr = format!("{}:{}", &c.addr, &c.port);
@@ -64,8 +64,8 @@ async fn run(
     }
 }
 
-fn crypto_init(c: &config::ClientCryptoConfig) -> stnet::Result<Arc<rustls::ClientConfig>> {
-    let crypto_cfg = config::ClientCrypto::from_config(c)?;
+fn crypto_init(c: &config::CryptoConfig) -> stnet::Result<Arc<rustls::ClientConfig>> {
+    let crypto_cfg = config::Crypto::from_config(c)?;
     let mut root_cert_store = rustls::RootCertStore::empty();
     if !crypto_cfg.ca.is_empty() {
         for cert in crypto_cfg.ca {

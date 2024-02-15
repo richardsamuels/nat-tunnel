@@ -7,9 +7,9 @@ use tracing::info;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let args = config::ServerArgs::parse();
+    let args = config::Args::parse();
 
-    let c = config::load_server_config(&args.config);
+    let c = config::load_config(&args.config);
 
     let addr: SocketAddr = format!("0.0.0.0:{}", &c.port).parse().unwrap();
     info!("listening on {}", &addr);

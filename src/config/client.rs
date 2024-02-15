@@ -16,15 +16,15 @@ pub struct Tunnel {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ClientConfig {
+pub struct Config {
     pub psk: String,
     pub addr: String,
     pub port: u16,
     pub tunnels: Vec<Tunnel>,
-    pub crypto: Option<ClientCryptoConfig>,
+    pub crypto: Option<CryptoConfig>,
 }
 
-impl ClientConfig {
+impl Config {
     /// Lookup `local_port` for a given `remote_port`
     pub fn local_port(&self, remote_port: u16) -> Option<u16> {
         for t in &self.tunnels {
@@ -37,7 +37,7 @@ impl ClientConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ClientCryptoConfig {
+pub struct CryptoConfig {
     #[serde(default = "default_sni_name")]
     pub sni_name: String,
     pub ca: Option<PathBuf>,
@@ -48,16 +48,16 @@ fn default_sni_name() -> String {
 }
 
 #[derive(Debug)]
-pub struct ClientCrypto {
+pub struct Crypto {
     pub ca: Vec<CertificateDer<'static>>,
 }
 
-impl ClientCrypto {
-    pub fn from_config(cfg: &ClientCryptoConfig) -> Result<ClientCrypto> {
+impl Crypto {
+    pub fn from_config(cfg: &CryptoConfig) -> Result<Crypto> {
         Self::new(&cfg.ca)
     }
 
-    fn new<P: AsRef<Path> + std::fmt::Debug>(ca: &Option<P>) -> Result<ClientCrypto> {
+    fn new<P: AsRef<Path> + std::fmt::Debug>(ca: &Option<P>) -> Result<Crypto> {
         use std::fs::File;
         use std::io::BufReader;
 
@@ -73,24 +73,24 @@ impl ClientCrypto {
                     .collect()
             }
         };
-        Ok(ClientCrypto { ca: ca_ })
+        Ok(Crypto { ca: ca_ })
     }
 }
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-pub struct ClientArgs {
+pub struct Args {
     #[arg(short, long, default_value = "./stc.toml")]
     pub config: PathBuf,
 }
 
-pub fn load_client_config(config: &Path) -> ClientConfig {
+pub fn load_config(config: &Path) -> Config {
     let config_contents = match read_to_string(config) {
         Ok(args) => args,
         Err(e) => panic!("Failed to read config file '{:?}'. Error: {}", &config, e),
     };
 
-    let c: ClientConfig = match toml::from_str(&config_contents) {
+    let c: Config = match toml::from_str(&config_contents) {
         Ok(c) => c,
         Err(e) => panic!("Failed to parse config file '{:?}'.\n{}", config, e),
     };

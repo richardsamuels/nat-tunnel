@@ -9,20 +9,20 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, rsa_private_keys};
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ServerConfig {
+pub struct Config {
     pub psk: String,
     pub port: u16,
-    pub crypto: Option<ServerCryptoConfig>,
+    pub crypto: Option<CryptoConfig>,
 }
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-pub struct ServerArgs {
+pub struct Args {
     #[arg(short, long, default_value = "./sts.toml")]
     pub config: PathBuf,
 }
 
-pub fn load_server_config(config: &Path) -> ServerConfig {
+pub fn load_config(config: &Path) -> Config {
     let config_contents = match read_to_string(config) {
         Ok(args) => args,
         Err(e) => panic!("Failed to read config file '{:?}'. Error: {}", &config, e),
@@ -35,26 +35,23 @@ pub fn load_server_config(config: &Path) -> ServerConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ServerCryptoConfig {
+pub struct CryptoConfig {
     pub key: PathBuf,
     pub cert: PathBuf,
 }
 
 #[derive(Debug)]
-pub struct ServerCrypto {
+pub struct Crypto {
     pub key: PrivateKeyDer<'static>,
     pub certs: Vec<CertificateDer<'static>>,
 }
 
-impl ServerCrypto {
-    pub fn from_crypto_cfg(cfg: &ServerCryptoConfig) -> Result<ServerCrypto> {
+impl Crypto {
+    pub fn from_crypto_cfg(cfg: &CryptoConfig) -> Result<Crypto> {
         Self::new(&cfg.key, &cfg.cert)
     }
 
-    fn new<P: AsRef<Path>, Q: AsRef<Path> + std::fmt::Debug>(
-        key: P,
-        cert: Q,
-    ) -> Result<ServerCrypto> {
+    fn new<P: AsRef<Path>, Q: AsRef<Path> + std::fmt::Debug>(key: P, cert: Q) -> Result<Crypto> {
         use std::fs::File;
         use std::io::BufReader;
 
@@ -74,6 +71,6 @@ impl ServerCrypto {
             .expect("invalid private key. (Convert your key with: openssl rsa -in your.key -out new.key -traditional)")
             .map(Into::into)?;
 
-        Ok(ServerCrypto { key, certs: certs_ })
+        Ok(Crypto { key, certs: certs_ })
     }
 }

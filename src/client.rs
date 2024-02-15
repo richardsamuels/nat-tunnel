@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 use tracing::{error, info};
 
 pub struct Client<'a, T> {
-    config: &'a config::ClientConfig,
+    config: &'a config::Config,
     transport: stnet::Transport<T>,
 
     to_server: mpsc::Sender<stnet::RedirectorFrame>,
@@ -26,7 +26,7 @@ where
         + stnet::PeerAddr
         + std::os::fd::AsRawFd,
 {
-    pub fn new(config: &'a config::ClientConfig, stream: T) -> Client<'a, T> {
+    pub fn new(config: &'a config::Config, stream: T) -> Client<'a, T> {
         stnet::set_keepalive(&stream, true)
             .expect("keepalive should have be enabled on stream, but operation failed");
 
