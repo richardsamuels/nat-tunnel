@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio_util::codec;
 
-pub type FramedLength<T> = tokio_util::codec::Framed<T, codec::LengthDelimitedCodec>;
+pub type FramedLength<T> = tokio_util::codec::Framed<T, codec::BytesCodec>;
 pub type Framed<T> = tokio_serde::Framed<
     FramedLength<T>,
     Frame,
@@ -18,11 +18,11 @@ fn frame<T>(stream: T) -> Framed<T>
 where
     T: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + std::marker::Unpin + PeerAddr,
 {
-    let len_codec = codec::LengthDelimitedCodec::new();
-    let len_delimited = codec::Framed::new(stream, len_codec);
+    let bytes_codec = codec::BytesCodec::new();
+    let bytes_frame = codec::Framed::new(stream, bytes_codec);
 
-    let codec = tokio_serde::formats::MessagePack::default();
-    Framed::new(len_delimited, codec)
+    let msgpack_codec = tokio_serde::formats::MessagePack::default();
+    Framed::new(bytes_frame, msgpack_codec)
 }
 
 pub struct Transport<T> {
@@ -59,10 +59,14 @@ where
             Err(e) => return Err(e.into()),
             Ok(()) => (),
         };
+
+        // XXX Flush MUST be called here. See tokio_rustls docs:
+        // https://docs.rs/tokio-rustls/latest/tokio_rustls/index.html#why-do-i-need-to-call-poll_flush
         self.framed.flush().await.map_err(|x| x.into())
     }
 }
 
+// TODO everything below here is yuck.
 pub trait PeerAddr {
     fn addr(&self) -> std::io::Result<SocketAddr>;
 }
