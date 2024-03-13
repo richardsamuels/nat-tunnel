@@ -7,6 +7,6 @@ pub mod client;
 pub mod redirector;
 pub mod server;
 
-pub(crate) type StdResult<T, U> = std::result::Result<T, U>;
+//pub(crate) type StdResult<T, U> = std::result::Result<T, U>;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T> = StdResult<T, net::Error>;
+pub type Result<T> = color_eyre::eyre::Result<T>;

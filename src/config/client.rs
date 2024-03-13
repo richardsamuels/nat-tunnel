@@ -1,6 +1,8 @@
+use crate::net as stnet;
 use crate::Result;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use snafu::prelude::*;
 use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
@@ -61,8 +63,8 @@ impl Crypto {
         let ca_: Vec<_> = match ca {
             None => Vec::new(),
             Some(ca) => {
-                let ca_fh = File::open(ca).map_err(|e| -> crate::net::Error {
-                    format!("Failed to read CA file {:?}: {}", ca, e).into()
+                let ca_fh = File::open(ca).context(stnet::IoSnafu {
+                    message: "failed to read ca file",
                 })?;
 
                 certs(&mut BufReader::new(ca_fh))
@@ -93,16 +95,24 @@ pub fn load_config(config: &Path) -> Config {
     };
 
     if c.psk.len() > 512 || c.psk.is_empty() {
-        panic!("psk length must be [0, 512] bytes");
+        panic!("psk length must be (0, 512] bytes");
     }
     if c.addr.is_empty() {
         panic!("addr must not be empty");
     }
 
+    if c.crypto.is_some() {
+        rustls::pki_types::ServerName::try_from(c.crypto.as_ref().unwrap().sni_name.clone())
+            .expect("sni_name must be a valid DNS name or IP address");
+    }
+
     let mut temp = HashSet::new();
     for t in &c.tunnels {
         if temp.contains(&t.remote_port) {
-            panic!("Configuration file contains duplicate remote_ports.");
+            panic!(
+                "Configuration file contains duplicate remote_ports: {}",
+                t.remote_port
+            );
         }
         temp.insert(t.remote_port);
     }

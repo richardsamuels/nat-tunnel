@@ -1,5 +1,6 @@
 use clap::Parser;
-use simple_tunnel::{client, config::client as config, net as stnet};
+use simple_tunnel::Result;
+use simple_tunnel::{client, config::client as config};
 use std::process::exit;
 use std::sync::Arc;
 use tokio::net as tnet;
@@ -30,10 +31,7 @@ async fn main() {
     }
 }
 
-async fn run(
-    c: &config::Config,
-    crypto_cfg: &Option<Arc<rustls::ClientConfig>>,
-) -> stnet::Result<()> {
+async fn run(c: &config::Config, crypto_cfg: &Option<Arc<rustls::ClientConfig>>) -> Result<()> {
     let addr = format!("{}:{}", &c.addr, &c.port);
     info!("Handshaking with {}", &addr);
     let client_stream = match tnet::TcpStream::connect(&addr).await {
@@ -47,10 +45,7 @@ async fn run(
     if let Some(ref crypto_cfg) = crypto_cfg {
         let domain =
             rustls::pki_types::ServerName::try_from(c.crypto.as_ref().unwrap().sni_name.clone())
-                .map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid dnsname")
-                })
-                .expect("sni_name did not parse")
+                .unwrap()
                 .to_owned();
 
         let conn = TlsConnector::from(crypto_cfg.clone());
@@ -68,7 +63,7 @@ async fn run(
     }
 }
 
-fn crypto_init(c: &config::CryptoConfig) -> stnet::Result<Arc<rustls::ClientConfig>> {
+fn crypto_init(c: &config::CryptoConfig) -> Result<Arc<rustls::ClientConfig>> {
     let crypto_cfg = config::Crypto::from_config(c)?;
     let mut root_cert_store = rustls::RootCertStore::empty();
     if !crypto_cfg.ca.is_empty() {

@@ -5,6 +5,7 @@ use std::vec::Vec;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum RedirectorFrame {
+    StartListener(SocketAddr, u16),
     Datagram(Datagram),
     KillListener(SocketAddr),
 }
@@ -12,6 +13,7 @@ pub enum RedirectorFrame {
 impl RedirectorFrame {
     pub fn id(&self) -> &SocketAddr {
         match self {
+            RedirectorFrame::StartListener(id, _) => id,
             RedirectorFrame::Datagram(d) => &d.id,
             RedirectorFrame::KillListener(id) => id,
         }
@@ -27,8 +29,10 @@ impl std::convert::From<Datagram> for RedirectorFrame {
 pub enum Frame {
     Auth(LimitedString<512>),
     Tunnels(Vec<u16>),
+    ListenerStart(SocketAddr),
     Redirector(RedirectorFrame),
-    Kthxbai, // TODO can be removed?
+    ListenerEnd(SocketAddr),
+    Kthxbai,
 }
 
 impl std::convert::From<Datagram> for Frame {

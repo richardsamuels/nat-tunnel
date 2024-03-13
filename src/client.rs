@@ -1,11 +1,11 @@
-use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector};
+use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace};
+use tracing::{error, info, info_span, trace};
 
 pub struct Client<'a, T> {
     config: &'a config::Config,
@@ -43,14 +43,14 @@ where
         }
     }
 
-    async fn push_tunnel_config(&mut self) -> std::result::Result<(), stnet::Error> {
+    async fn push_tunnel_config(&mut self) -> Result<()> {
         self.transport
             .write_frame(Frame::Auth(self.config.psk.clone().into()))
             .await?;
 
         let frame = self.transport.read_frame().await?;
         let stnet::Frame::Auth(_) = frame else {
-            return Err(stnet::Error::ConnectionRefused);
+            return Err(stnet::Error::ConnectionRefused.into());
         };
 
         let tunnels = self
@@ -63,21 +63,26 @@ where
 
         let frame = self.transport.read_frame().await?;
         let stnet::Frame::Tunnels(_) = frame else {
-            return Err(stnet::Error::ConnectionRefused);
+            return Err(stnet::Error::ConnectionRefused.into());
         };
         info!("Pushed tunnel config to remote");
         Ok(())
     }
 
-    pub async fn run(&mut self) -> std::result::Result<(), stnet::Error> {
+    pub async fn run(&mut self) -> Result<()> {
+        let span = info_span!("loop", addr = ?self.transport.peer_addr());
         self.push_tunnel_config().await?;
+        let _guard = span.enter();
         let ret = loop {
             tokio::select! {
                 // A tunnel has completed it's redirection
                 maybe_join = self.handlers.join_next() => {
                     let addr = match maybe_join {
                         None => continue,
-                        Some(Err(_)) => unreachable!(), // TODO
+                        Some(Err(e)) => {
+                            error!(cause = ?e, "redirector task panicked");
+                            continue
+                        },
                         Some(Ok(h)) => h,
                     };
                     info!(addr = ?addr, "Cleaned up redirector");
@@ -88,7 +93,7 @@ where
                     let frame = match maybe_frame {
                         Err(e) => {
                             error!(cause = ?e, "failed to read");
-                            break Err(e);
+                            break Err(e.into());
                         }
                         Ok(s) => s,
                     };
@@ -99,11 +104,11 @@ where
                         }
                         Frame::Redirector(r) => {
                             if let Err(e) = self.try_datagram(r).await {
-                                error!(cause = ?e, addr = ?self.transport.peer_addr(), "redirector failed");
+                                error!(cause = ?e, "redirector failed");
                             }
                         }
                         f => {
-                            info!(addr = ?self.transport.peer_addr(), "received unexpected frame");
+                            info!("received unexpected frame");
                             trace!(frame = ?f, addr = ?self.transport.peer_addr(), "FRAME");
                         }
                     }
@@ -116,8 +121,8 @@ where
                         Some(d) => d,
                     };
                     if let Err(e) = self.transport.write_frame(data.into()).await {
-                        error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed to write frame");
-                        break Err(e);
+                        error!(cause = ?e, "failed to write frame");
+                        break Err(e.into());
                     };
                 }
             }
@@ -126,63 +131,64 @@ where
         ret
     }
 
-    async fn new_conn(&mut self, d: &stnet::Datagram) -> std::result::Result<(), stnet::Error> {
-        let tunnel_cfg = match self.config.tunnel(d.port) {
-            None => return Err(format!("unknown port {}", d.port).into()),
+    async fn new_conn(&mut self, id: SocketAddr, port: u16) -> Result<()> {
+        let tunnel_cfg = match self.config.tunnel(port) {
+            None => {
+                unreachable!();
+            }
             Some(p) => p,
         };
         let internal_addr: SocketAddr =
             format!("{}:{}", tunnel_cfg.local_hostname, tunnel_cfg.local_port)
                 .parse()
                 .unwrap();
-        info!(internal_addr = ?internal_addr, for_ = ?d.id, "connecting to Internal");
+        info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal");
         let internal_stream = match tnet::TcpStream::connect(internal_addr).await {
             Ok(s) => s,
             Err(e) => {
-                error!(cause = ?e, addr = ?internal_addr, for_ = ?d.id, "Failed to connect to Internal");
+                error!(cause = ?e, addr = ?internal_addr, for_ = ?id, "Failed to connect to Internal");
                 return Err(e.into());
             }
         };
 
-        let id = d.id;
-        let port = d.port;
         let to_server = self.to_server.clone();
         let token = self.token.clone();
         let (to_internal, from_internal) = mpsc::channel(16);
-        self.to_internal.insert(d.id, to_internal);
+        self.to_internal.insert(id, to_internal);
         self.handlers.spawn(async move {
             let mut r =
                 Redirector::with_stream(id, port, token, internal_stream, to_server, from_internal);
-            let _ = r.run().await;
+            r.run().await;
             id
         });
         Ok(())
     }
 
-    async fn try_datagram(
-        &mut self,
-        frame: stnet::RedirectorFrame,
-    ) -> std::result::Result<(), stnet::Error> {
-        if let stnet::RedirectorFrame::Datagram(ref d) = frame {
-            // Open a tunnel to the internal if needed
-            if !self.to_internal.contains_key(&d.id) {
-                if let Err(e) = self.new_conn(d).await {
-                    // make sure the Server kills off the connection on its side
-                    let d = stnet::RedirectorFrame::KillListener(d.id);
-                    self.transport.write_frame(d.into()).await?;
-                    return Err(e);
+    async fn try_datagram(&mut self, frame: stnet::RedirectorFrame) -> Result<()> {
+        match frame {
+            stnet::RedirectorFrame::Datagram(ref _d) => {
+                let to_internal = match self.to_internal.get(frame.id()) {
+                    None => {
+                        error!(id = ?frame.id(),"no channel");
+                        return Ok(());
+                    }
+                    Some(s) => s,
+                };
+                to_internal.send(frame).await?;
+            }
+            stnet::RedirectorFrame::StartListener(id, port) => {
+                // Open a tunnel to the internal if needed
+                if !self.to_internal.contains_key(&id) {
+                    if let Err(e) = self.new_conn(id, port).await {
+                        // make sure the Server kills off the connection on its side
+                        let d = stnet::RedirectorFrame::KillListener(id);
+                        self.transport.write_frame(d.into()).await?;
+                        return Err(e);
+                    }
                 }
             }
+            stnet::RedirectorFrame::KillListener(_) => unreachable!(),
         }
-
-        let to_internal = match self.to_internal.get(frame.id()) {
-            None => {
-                error!(id = ?frame.id(),"no channel");
-                return Ok(());
-            }
-            Some(s) => s,
-        };
-        to_internal.send(frame).await?;
 
         Ok(())
     }
