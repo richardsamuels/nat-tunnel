@@ -1,4 +1,5 @@
 use crate::{config::server as config, net as stnet, redirector::Redirector, Result};
+use snafu::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -6,7 +7,7 @@ use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
 type ActiveTunnels = HashSet<u16>;
@@ -19,6 +20,26 @@ pub struct Server {
 
     tls: Option<TlsAcceptor>,
 }
+
+#[derive(Snafu, Debug)]
+enum ClientValidationError {
+    #[snafu(display(
+        "client sent configuration with remote_ports {tunnels:?}, which are already in use"
+    ))]
+    DuplicateTunnels { tunnels: Vec<u16> },
+    #[snafu(display("Incorrect PSK from client"))]
+    IncorrectPSK,
+    #[snafu(display("transport error"))]
+    TransportError { source: stnet::Error },
+}
+
+impl std::convert::From<stnet::Error> for ClientValidationError {
+    fn from(value: stnet::Error) -> Self {
+        ClientValidationError::TransportError { source: value }
+    }
+}
+
+type ClientResult<T> = std::result::Result<T, ClientValidationError>;
 
 impl Server {
     pub fn new(
@@ -48,6 +69,11 @@ impl Server {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        if self.tls.is_some() {
+            info!("TLS enabled. All connections to Clients will be encrypted.");
+        } else {
+            warn!("TLS *DISABLED*. All data is transmitted in the clear.");
+        }
         loop {
             let (socket, addr) = match self.listener.accept().await {
                 Err(e) => {
@@ -62,7 +88,6 @@ impl Server {
             let token = self.token.clone();
 
             if let Some(tls) = &self.tls {
-                info!("TLS enabled. All connections to Clients will be encrypted.");
                 let socket = match tls.accept(socket).await {
                     Err(e) => {
                         error!(cause = ?e, addr = ?addr, "client connection dropped");
@@ -139,19 +164,19 @@ where
     }
 
     /// Validate the client and create external listeners
-    async fn auth(&mut self) -> Result<()> {
+    async fn auth(&mut self) -> ClientResult<()> {
         info!(addr = ?self.transport.peer_addr(), "accepted connection from client");
 
         let frame = self.transport.read_frame().await?;
         {
             let auth = match frame {
                 stnet::Frame::Auth(ref auth) => auth,
-                _ => return Err(stnet::Error::UnexpectedFrame),
+                _ => return Err(stnet::Error::UnexpectedFrame.into()),
             };
 
+            // TODO: constant time compare required.
             if self.config.psk != auth.0 {
-                // TODO: constant time compare required.
-                return Err(format!("Incorrect PSK from {:?}", self.transport.peer_addr()).into());
+                return Err(ClientValidationError::IncorrectPSK);
             }
         }
         self.transport.write_frame(frame).await?; // ack the auth
@@ -161,23 +186,23 @@ where
     async fn validate_tunnels(&mut self) -> Result<Vec<u16>> {
         let tunnels = match self.transport.read_frame().await? {
             stnet::Frame::Tunnels(t) => t,
-            _ => return Err("client did not send tunnel config".to_string().into()),
+            _ => return Err(stnet::Error::UnexpectedFrame.into()),
         };
 
-        let bad_tunnels: Vec<_> = {
+        let bad_tunnels: Vec<u16> = {
             let active_tunnels = self.active_tunnels.lock().unwrap();
             tunnels
                 .iter()
                 .filter(|x| active_tunnels.contains(x))
+                .cloned()
                 .collect()
         };
 
         if !bad_tunnels.is_empty() {
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
-            return Err(format!(
-                "client sent configuration with remote_port {:?}, which is already in use",
-                bad_tunnels
-            )
+            return Err(ClientValidationError::DuplicateTunnels {
+                tunnels: bad_tunnels,
+            }
             .into());
         }
         self.transport
@@ -241,23 +266,20 @@ where
                     let frame = match maybe_frame {
                         Err(stnet::Error::ConnectionDead) => {
                             error!(addr = ?self.transport.peer_addr(), "connection is dead");
-                            break Err(stnet::Error::ConnectionDead)
+                            break Err(stnet::Error::ConnectionDead.into())
 
                         },
                         Err(e) => {
                             error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed reading frame from network");
-                            break Err(e)
+                            break Err(e.into())
                         }
                         Ok(f) => f,
                     };
                     match frame {
                         stnet::Frame::Redirector(r) => {
-                            let id = match r {
-                                stnet::RedirectorFrame::Datagram(ref d) => d.id,
-                                stnet::RedirectorFrame::KillListener(id) => id,
-                            };
-                            match self.get_tunnel_tx(id) {
-                                None => error!(addr = ?id, "no channel for port"),
+                            let id = r.id();
+                            match self.get_tunnel_tx(*id) {
+                                None => trace!(addr = ?id, "no channel for port. connection already killed?"),
                                 Some(tx) => tx.send(r).await?,
                             }
                         }
@@ -275,7 +297,7 @@ where
 
         {
             let mut active_tunnels = self.active_tunnels.lock().unwrap();
-            info!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
+            trace!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
             for (t, h) in handlers.iter() {
                 h.abort();
                 active_tunnels.remove(t);
@@ -324,6 +346,12 @@ impl ExternalListener {
             };
 
             info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
+            self.to_client
+                .send(stnet::RedirectorFrame::StartListener(
+                    external_addr,
+                    self.remote_port,
+                ))
+                .await?;
 
             let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
             {
@@ -344,7 +372,7 @@ impl ExternalListener {
                     to_client,
                     from_client,
                 );
-                let _ = r.run().await;
+                r.run().await;
                 let mut tunnels = tunnels.lock().unwrap();
                 tunnels.remove(&external_addr);
                 trace!(addr = ?external_addr, "Tunnel done");

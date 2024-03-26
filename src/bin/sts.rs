@@ -1,5 +1,6 @@
 use clap::Parser;
-use simple_tunnel::{config::server as config, server, Result};
+use color_eyre::eyre::Result;
+use simple_tunnel::{config::server as config, server};
 use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio_util::sync::CancellationToken;
@@ -8,6 +9,7 @@ use tracing::info;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    color_eyre::install()?;
     let args = config::Args::parse();
 
     let c = config::load_config(&args.config);

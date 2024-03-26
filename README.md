@@ -14,7 +14,8 @@ the following command `openssl rsa -in key -out key.traditional -traditional`.
 cargo build
 cargo clippy --no-deps
 cargo test
-# run these from the manifest directory or provide add -- -c path/to/cfg.toml
+# run these from the manifest directory or provide a path to configuration files
+# e.g.: `-- -c path/to/cfg.toml`
 cargo run --bin sts
 cargo run --bin stc
 ```

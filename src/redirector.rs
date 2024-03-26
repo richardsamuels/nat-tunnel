@@ -1,4 +1,4 @@
-use crate::{net as stnet, Result};
+use crate::net as stnet;
 use std::net::SocketAddr;
 use tnet::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::io::AsyncBufReadExt;
@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, B
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace};
+use tracing::{error, trace, trace_span};
 
 // TODO using 1500 b/c it's the default MTU value on networks.
 // This needs refinement
@@ -73,21 +73,24 @@ where
             rx,
         }
     }
-    pub async fn run(&mut self) -> Result<()> {
-        trace!(addr = ?self.id, "Tunnel start");
+    pub async fn run(&mut self) {
+        let span = trace_span!("tunnel start", addr = ?self.id);
+        let _guard = span.enter();
+
         let mut buf = [0u8; BUFFER_CAPACITY];
         loop {
             tokio::select! {
                 maybe_len = self.reader.read(&mut buf) => {
                     let len = match maybe_len {
                         Err(e) => {
-                            error!(cause = ?e, "failed to read from network");
+                            error!(addr = ?self.id, cause = ?e, "failed to read from network");
                             break;
                         },
                         Ok(l) => l,
                     };
                     if len == 0 {
-                        self.tx.send(stnet::RedirectorFrame::KillListener(self.id)).await?;
+                        let _ = self.tx.send(stnet::RedirectorFrame::KillListener(self.id)).await;
+                        trace!("read 0 bytes, ending redirector");
                         break
                     }
                     let d = stnet::Datagram {
@@ -96,27 +99,33 @@ where
                         data: buf[0..len].to_vec(),
                     };
                     self.reader.consume(len);
-                    self.tx.send(d.into()).await?;
+                    let _ = self.tx.send(d.into()).await;
                 }
 
                 maybe_data = self.rx.recv() => {
                     let data = match maybe_data {
                         None => break,
                         Some(stnet::RedirectorFrame::KillListener(_)) => {
-                            info!(id = ?self.id, "killing listener");
+                            trace!("killing listener on remote request");
                             break
                         }
                         Some(stnet::RedirectorFrame::Datagram(d)) => d,
+                        Some(stnet::RedirectorFrame::StartListener(_, _)) => unreachable!(),
                     };
-                    self.writer.write_all(&data.data).await?;
-                    self.writer.flush().await?;
+                    if let Err(e) = self.writer.write_all(&data.data).await {
+                        error!(cause = ?e, "failed to write buffer");
+                        break
+                    };
+                    if let Err(e) = self.writer.flush().await {
+                        error!(cause = ?e, "failed to flush buffer");
+                        break
+                    }
                 }
 
                 _ = self.token.cancelled() => break,
             }
         }
         self.rx.close();
-        trace!(addr = ?self.id, "Tunnel end");
-        Ok(())
+        trace!("Tunnel end");
     }
 }
