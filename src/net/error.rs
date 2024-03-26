@@ -33,23 +33,3 @@ pub enum Error {
         backtrace: snafu::Backtrace,
     },
 }
-
-//impl std::convert::From<std::string::String> for Error {
-//    fn from(value: std::string::String) -> Self {
-//        Error::Other { source: value }
-//    }
-//}
-
-//impl std::convert::From<&str> for Error {
-//    fn from(value: &str) -> Self {
-//        Error::Other {
-//            source: value.to_string(),
-//        }
-//    }
-//}
-
-//impl std::convert::From<std::io::Error> for Error {
-//    fn from(value: std::io::Error) -> Self {
-//        Error::Io { source: value }
-//    }
-//}
