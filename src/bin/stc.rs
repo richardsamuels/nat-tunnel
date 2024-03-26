@@ -5,11 +5,13 @@ use std::process::exit;
 use std::sync::Arc;
 use tokio::net as tnet;
 use tokio_rustls::TlsConnector;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+    color_eyre::install().unwrap();
     let args = config::Args::parse();
 
     let c = config::load_config(&args.config);
@@ -18,8 +20,9 @@ async fn main() {
         .as_ref()
         .map(|c| crypto_init(c).expect("failed to load cert files"));
 
+    let token = CancellationToken::new();
     tokio::select! {
-        maybe_run = run(&c, &crypto_cfg ) => {
+        maybe_run = run(c, token.clone(), &crypto_cfg ) => {
             match maybe_run {
                 Ok(_) => exit(0),
                 e => {
@@ -31,7 +34,11 @@ async fn main() {
     }
 }
 
-async fn run(c: &config::Config, crypto_cfg: &Option<Arc<rustls::ClientConfig>>) -> Result<()> {
+async fn run(
+    c: config::Config,
+    token: CancellationToken,
+    crypto_cfg: &Option<Arc<rustls::ClientConfig>>,
+) -> Result<()> {
     let addr = format!("{}:{}", &c.addr, &c.port);
     info!("Handshaking with {}", &addr);
     let client_stream = match tnet::TcpStream::connect(&addr).await {
@@ -55,10 +62,10 @@ async fn run(c: &config::Config, crypto_cfg: &Option<Arc<rustls::ClientConfig>>)
             .expect("TLS initialization failed");
 
         info!("TLS enabled. All connections to the Server will be encrypted.");
-        let mut client = client::Client::new(c, client_stream);
+        let mut client = client::Client::new(c, token, client_stream);
         client.run().await
     } else {
-        let mut client = client::Client::new(c, client_stream);
+        let mut client = client::Client::new(c, token, client_stream);
         client.run().await
     }
 }

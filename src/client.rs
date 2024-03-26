@@ -5,10 +5,10 @@ use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, trace};
+use tracing::{debug_span, error, info, trace};
 
-pub struct Client<'a, T> {
-    config: &'a config::Config,
+pub struct Client<T> {
+    config: config::Config,
     token: CancellationToken,
     transport: stnet::Transport<T>,
 
@@ -19,7 +19,7 @@ pub struct Client<'a, T> {
     handlers: JoinSet<SocketAddr>,
 }
 
-impl<'a, T> Client<'a, T>
+impl<'a, T> Client<T>
 where
     T: tokio::io::AsyncReadExt
         + tokio::io::AsyncWriteExt
@@ -27,14 +27,14 @@ where
         + stnet::PeerAddr
         + std::os::fd::AsRawFd,
 {
-    pub fn new(config: &'a config::Config, stream: T) -> Client<'a, T> {
+    pub fn new(config: config::Config, token: CancellationToken, stream: T) -> Client<T> {
         stnet::set_keepalive(&stream, true)
             .expect("keepalive should have be enabled on stream, but operation failed");
 
         let (tx, rx) = mpsc::channel(16);
         Client {
             config,
-            token: CancellationToken::new(),
+            token,
             transport: stnet::Transport::new(stream),
             handlers: JoinSet::new(),
             to_server: tx,
@@ -65,12 +65,12 @@ where
         let stnet::Frame::Tunnels(_) = frame else {
             return Err(stnet::Error::ConnectionRefused.into());
         };
-        info!("Pushed tunnel config to remote");
+        trace!("Pushed tunnel config to remote");
         Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let span = info_span!("loop", addr = ?self.transport.peer_addr());
+        let span = debug_span!("loop", addr = ?self.transport.peer_addr());
         self.push_tunnel_config().await?;
         let _guard = span.enter();
         let ret = loop {
@@ -85,7 +85,7 @@ where
                         },
                         Some(Ok(h)) => h,
                     };
-                    info!(addr = ?addr, "Cleaned up redirector");
+                    trace!(addr = ?addr, "Cleaned up redirector");
                 }
 
                 // Client receives a frame from Server
@@ -103,13 +103,12 @@ where
                             break Ok(());
                         }
                         Frame::Redirector(r) => {
-                            if let Err(e) = self.try_datagram(r).await {
+                            if let Err(e) = self.redirector_frame(r).await {
                                 error!(cause = ?e, "redirector failed");
                             }
                         }
                         f => {
-                            info!("received unexpected frame");
-                            trace!(frame = ?f, addr = ?self.transport.peer_addr(), "FRAME");
+                            trace!(frame = ?f, addr = ?self.transport.peer_addr(), "received unexpected frame");
                         }
                     }
                 }
@@ -124,6 +123,10 @@ where
                         error!(cause = ?e, "failed to write frame");
                         break Err(e.into());
                     };
+                }
+
+                _ = self.token.cancelled() => {
+                    break Ok(());
                 }
             }
         };
@@ -164,7 +167,7 @@ where
         Ok(())
     }
 
-    async fn try_datagram(&mut self, frame: stnet::RedirectorFrame) -> Result<()> {
+    async fn redirector_frame(&mut self, frame: stnet::RedirectorFrame) -> Result<()> {
         match frame {
             stnet::RedirectorFrame::Datagram(ref _d) => {
                 let to_internal = match self.to_internal.get(frame.id()) {
@@ -187,7 +190,7 @@ where
                     }
                 }
             }
-            stnet::RedirectorFrame::KillListener(_) => unreachable!(),
+            stnet::RedirectorFrame::KillListener(_) => (),
         }
 
         Ok(())

@@ -48,7 +48,7 @@ where
     }
 
     pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
-        self.framed.get_ref().get_ref().addr()
+        self.framed.get_ref().get_ref().peer_addr()
     }
 
     pub async fn read_frame(&mut self) -> Result<Frame> {
@@ -90,17 +90,17 @@ where
 
 // TODO everything below here is yuck.
 pub trait PeerAddr {
-    fn addr(&self) -> std::io::Result<SocketAddr>;
+    fn peer_addr(&self) -> std::io::Result<SocketAddr>;
 }
 
 impl PeerAddr for tnet::TcpStream {
-    fn addr(&self) -> std::io::Result<SocketAddr> {
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
         self.peer_addr()
     }
 }
 
 impl PeerAddr for tokio_rustls::TlsStream<tnet::TcpStream> {
-    fn addr(&self) -> std::io::Result<SocketAddr> {
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
         match self {
             tokio_rustls::TlsStream::Client(_) => {
                 let (stream, _) = self.get_ref();
@@ -115,14 +115,14 @@ impl PeerAddr for tokio_rustls::TlsStream<tnet::TcpStream> {
 }
 
 impl PeerAddr for tokio_rustls::client::TlsStream<tnet::TcpStream> {
-    fn addr(&self) -> std::io::Result<SocketAddr> {
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
         let (stream, _) = self.get_ref();
         stream.peer_addr()
     }
 }
 
 impl PeerAddr for tokio_rustls::server::TlsStream<tnet::TcpStream> {
-    fn addr(&self) -> std::io::Result<SocketAddr> {
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
         let (stream, _) = self.get_ref();
         stream.peer_addr()
     }

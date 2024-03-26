@@ -7,7 +7,7 @@ use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
 type ActiveTunnels = HashSet<u16>;
@@ -69,6 +69,11 @@ impl Server {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        if self.tls.is_some() {
+            info!("TLS enabled. All connections to Clients will be encrypted.");
+        } else {
+            warn!("TLS *DISABLED*. All data is transmitted in the clear.");
+        }
         loop {
             let (socket, addr) = match self.listener.accept().await {
                 Err(e) => {
@@ -83,7 +88,6 @@ impl Server {
             let token = self.token.clone();
 
             if let Some(tls) = &self.tls {
-                info!("TLS enabled. All connections to Clients will be encrypted.");
                 let socket = match tls.accept(socket).await {
                     Err(e) => {
                         error!(cause = ?e, addr = ?addr, "client connection dropped");
@@ -275,7 +279,7 @@ where
                         stnet::Frame::Redirector(r) => {
                             let id = r.id();
                             match self.get_tunnel_tx(*id) {
-                                None => error!(addr = ?id, "no channel for port"),
+                                None => trace!(addr = ?id, "no channel for port. connection already killed?"),
                                 Some(tx) => tx.send(r).await?,
                             }
                         }
@@ -293,7 +297,7 @@ where
 
         {
             let mut active_tunnels = self.active_tunnels.lock().unwrap();
-            info!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
+            trace!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
             for (t, h) in handlers.iter() {
                 h.abort();
                 active_tunnels.remove(t);

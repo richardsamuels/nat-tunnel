@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, B
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, trace};
+use tracing::{error, trace, trace_span};
 
 // TODO using 1500 b/c it's the default MTU value on networks.
 // This needs refinement
@@ -74,23 +74,23 @@ where
         }
     }
     pub async fn run(&mut self) {
-        let span = info_span!("tunnel start", addr = ?self.id);
+        let span = trace_span!("tunnel start", addr = ?self.id);
         let _guard = span.enter();
 
-        trace!(addr = ?self.id, "Tunnel start");
         let mut buf = [0u8; BUFFER_CAPACITY];
         loop {
             tokio::select! {
                 maybe_len = self.reader.read(&mut buf) => {
                     let len = match maybe_len {
                         Err(e) => {
-                            error!(cause = ?e, "failed to read from network");
+                            error!(addr = ?self.id, cause = ?e, "failed to read from network");
                             break;
                         },
                         Ok(l) => l,
                     };
                     if len == 0 {
                         let _ = self.tx.send(stnet::RedirectorFrame::KillListener(self.id)).await;
+                        trace!("read 0 bytes, ending redirector");
                         break
                     }
                     let d = stnet::Datagram {
@@ -106,7 +106,7 @@ where
                     let data = match maybe_data {
                         None => break,
                         Some(stnet::RedirectorFrame::KillListener(_)) => {
-                            info!("killing listener on request");
+                            trace!("killing listener on remote request");
                             break
                         }
                         Some(stnet::RedirectorFrame::Datagram(d)) => d,
