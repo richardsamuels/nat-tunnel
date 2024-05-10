@@ -48,6 +48,9 @@ async fn run(
         }
         Ok(s) => s,
     };
+    client_stream
+        .set_nodelay(true)
+        .expect("Could not set TCP_NODELAY on socket");
 
     if let Some(ref crypto_cfg) = crypto_cfg {
         let domain =

@@ -82,6 +82,9 @@ impl Server {
                 }
                 Ok(s) => s,
             };
+            socket
+                .set_nodelay(true)
+                .expect("Could not set TCP_NODELAY on socket");
 
             let c = self.config.clone();
             let active_tunnels = self.active_tunnels.clone();
