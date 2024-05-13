@@ -9,9 +9,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace, trace_span};
 
-// TODO using 1500 b/c it's the default MTU value on networks.
-// This needs refinement
-const BUFFER_CAPACITY: usize = 1500;
+// See tests/mtu.rs for explanation.
+// TODO parameterized base MTU
+pub const BUFFER_CAPACITY: usize = 1463;
 
 /// Reads data from stream, and send it along the `tx` channel
 /// Reads data from rx chnnale, and send it along the stream

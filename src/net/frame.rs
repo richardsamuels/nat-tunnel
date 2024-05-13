@@ -51,10 +51,10 @@ impl std::convert::From<RedirectorFrame> for Frame {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Datagram {
     #[serde(rename = "i")]
-    pub id: SocketAddr,
+    pub id: SocketAddr, // up to 16
     #[serde(rename = "p")]
-    pub port: u16,
-    #[serde(rename = "d")]
+    pub port: u16, // 16
+    #[serde(rename = "d", with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
