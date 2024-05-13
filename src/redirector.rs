@@ -1,5 +1,6 @@
 use crate::net as stnet;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 use tnet::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
@@ -8,9 +9,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace, trace_span};
 
-// TODO using 1500 b/c it's the default MTU value on networks.
-// This needs refinement
-const BUFFER_CAPACITY: usize = 1500;
+// See tests/mtu.rs for explanation.
+// TODO parameterized base MTU
+pub const BUFFER_CAPACITY: usize = 1463;
 
 /// Reads data from stream, and send it along the `tx` channel
 /// Reads data from rx chnnale, and send it along the stream
@@ -78,6 +79,9 @@ where
         let _guard = span.enter();
 
         let mut buf = [0u8; BUFFER_CAPACITY];
+        let mut last_activity = std::time::Instant::now();
+        let keepalive = Duration::from_secs(300);
+        let mut interval = tokio::time::interval(keepalive);
         loop {
             tokio::select! {
                 maybe_len = self.reader.read(&mut buf) => {
@@ -100,6 +104,7 @@ where
                     };
                     self.reader.consume(len);
                     let _ = self.tx.send(d.into()).await;
+                    last_activity = Instant::now();
                 }
 
                 maybe_data = self.rx.recv() => {
@@ -118,6 +123,14 @@ where
                     };
                     if let Err(e) = self.writer.flush().await {
                         error!(cause = ?e, "failed to flush buffer");
+                        break
+                    }
+                    last_activity = Instant::now();
+                }
+
+                _ = interval.tick() => {
+                    if last_activity.elapsed() >= keepalive {
+                        trace!("{} seconds passed without any activity. Closing.", keepalive.as_secs());
                         break
                     }
                 }

@@ -29,7 +29,7 @@ where
 {
     pub fn new(config: config::Config, token: CancellationToken, stream: T) -> Client<T> {
         stnet::set_keepalive(&stream, true)
-            .expect("keepalive should have be enabled on stream, but operation failed");
+            .expect("keepalive should be enabled on stream, but operation failed");
 
         let (tx, rx) = mpsc::channel(16);
         Client {
@@ -177,7 +177,7 @@ where
                     }
                     Some(s) => s,
                 };
-                to_internal.send(frame).await?;
+                to_internal.send(frame).await?
             }
             stnet::RedirectorFrame::StartListener(id, port) => {
                 // Open a tunnel to the internal if needed
@@ -190,7 +190,9 @@ where
                     }
                 }
             }
-            stnet::RedirectorFrame::KillListener(_) => (),
+            stnet::RedirectorFrame::KillListener(ref id) => {
+                self.to_internal.remove(id);
+            }
         }
 
         Ok(())
