@@ -254,13 +254,23 @@ where
         let ret = loop {
             // XXX You MUST NOT return in this loop
             tokio::select! {
-                // Redirect data from tunnel to client
                 maybe_rx = self.from_tunnels.recv() => {
                     let rframe = match maybe_rx {
                         None => break Ok(()),
                         Some(data) => data,
                     };
-                    self.transport.write_frame(rframe.into()).await?;
+                    // Add timeout for write operations
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.transport.write_frame(rframe.into())
+                    ).await {
+                        Ok(Ok(_)) => (),
+                        Ok(Err(e)) => break Err(e.into()),
+                        Err(_) => {
+                            error!("Write operation timed out");
+                            break Err(stnet::Error::ConnectionDead.into());
+                        }
+                    }
                 }
 
                 // Read from network
@@ -305,8 +315,12 @@ where
                 h.abort();
                 active_tunnels.remove(t);
             }
+            let mut tunnels = self.to_tunnels.lock().unwrap();
+            tunnels.clear();
         }
-        self.transport.shutdown().await?;
+        
+        // Ensure shutdown happens
+        let _ = self.transport.shutdown().await;
         ret
     }
 }
