@@ -62,7 +62,7 @@ where
                     source: e,
                     backtrace: snafu::Backtrace::capture(),
                 })
-            },
+            }
             Ok(None) => Err(Error::ConnectionDead),
             Ok(Some(frame)) => Ok(frame),
         }

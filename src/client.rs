@@ -180,16 +180,18 @@ where
                 };
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    to_internal.send(frame)
-                ).await {
+                    to_internal.send(frame),
+                )
+                .await
+                {
                     Ok(Ok(_)) => return Ok(()),
                     Ok(Err(_)) => {
                         self.to_internal.remove(&id);
-                        return Ok(())
-                    },
+                        return Ok(());
+                    }
                     Err(_) => {
                         self.to_internal.remove(&id);
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             }

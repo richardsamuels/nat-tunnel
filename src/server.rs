@@ -318,7 +318,7 @@ where
             let mut tunnels = self.to_tunnels.lock().unwrap();
             tunnels.clear();
         }
-        
+
         // Ensure shutdown happens
         let _ = self.transport.shutdown().await;
         ret
