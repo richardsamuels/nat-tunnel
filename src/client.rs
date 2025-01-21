@@ -126,14 +126,13 @@ where
                 }
 
                 _ = self.token.cancelled() => {
-                    error!("Cancellation requested");
-                    self.handlers.abort_all(); // Abort any remaining handlers
+                    self.handlers.abort_all();
                     break Ok(());
                 }
             }
         };
-        self.transport.shutdown().await?;
         self.handlers.shutdown().await;
+        self.transport.shutdown().await?;
         ret
     }
 
