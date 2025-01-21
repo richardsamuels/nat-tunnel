@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace, trace_span};
 
+// See tests/mtu.rs for an explanation of this magic number
 pub const PROTOCOL_OVERHEAD: u16 = 53;
 
 /// Reads data from stream, and send it along the `tx` channel
@@ -34,7 +35,14 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
         tx: mpsc::Sender<stnet::RedirectorFrame>,
         rx: mpsc::Receiver<stnet::RedirectorFrame>,
     ) -> Self {
-        let buffer_size = mtu - PROTOCOL_OVERHEAD;
+        // Look, what we're really trying to do here is calculate
+        // MTU - PROTOCOL_OVERHEAD - (TCP/UDP Overhead) - Quic Overhead - TLS overhead
+        // But i'm way too lazy to plumb all the required info, so
+        // Let's just use 1330, since ipv6 + QUIC says 1330 per packet
+        // Citation: https://blog.apnic.net/2019/03/04/a-quick-look-at-quic/
+        //let buffer_size = mtu - PROTOCOL_OVERHEAD;
+        let buffer_size = 1330;
+
         let (reader, writer) = stream.into_split();
         let reader = BufReader::with_capacity(buffer_size as usize, reader);
         let writer = BufWriter::with_capacity(buffer_size as usize, writer);
