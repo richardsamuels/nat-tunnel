@@ -127,6 +127,7 @@ where
 
                 _ = self.token.cancelled() => {
                     self.handlers.abort_all();
+                    self.transport.shutdown().await?;
                     break Ok(());
                 }
             }
