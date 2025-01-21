@@ -39,7 +39,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = u16::deserialize(deserializer)?;
-    eprintln!("Warning: mtu parameter is currently unused");
+    eprintln!("Warning: mtu parameter is currently ignored.");
     Ok(value)
 }
 
