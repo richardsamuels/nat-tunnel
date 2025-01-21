@@ -318,8 +318,7 @@ where
             tunnels.clear();
         }
 
-        // Ensure shutdown happens
-        let _ = self.transport.shutdown().await;
+        self.transport.shutdown().await?;
         ret
     }
 }
