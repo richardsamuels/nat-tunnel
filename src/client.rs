@@ -159,11 +159,19 @@ where
 
         let to_server = self.to_server.clone();
         let token = self.token.clone();
+        let mtu = self.config.mtu;
         let (to_internal, from_internal) = mpsc::channel(16);
         self.to_internal.insert(id, to_internal);
         self.handlers.spawn(async move {
-            let mut r =
-                Redirector::with_stream(id, port, token, internal_stream, to_server, from_internal);
+            let mut r = Redirector::with_stream(
+                id,
+                port,
+                mtu,
+                token,
+                internal_stream,
+                to_server,
+                from_internal,
+            );
             r.run().await;
             id
         });
@@ -173,14 +181,30 @@ where
     async fn redirector_frame(&mut self, frame: stnet::RedirectorFrame) -> Result<()> {
         match frame {
             stnet::RedirectorFrame::Datagram(ref _d) => {
-                let to_internal = match self.to_internal.get(frame.id()) {
+                let id = frame.id().clone();
+                let to_internal = match self.to_internal.get(&id) {
                     None => {
-                        error!(id = ?frame.id(),"no channel");
+                        error!(id = ?id,"no channel");
                         return Ok(());
                     }
                     Some(s) => s,
                 };
-                to_internal.send(frame).await?
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    to_internal.send(frame),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => return Ok(()),
+                    Ok(Err(_)) => {
+                        self.to_internal.remove(&id);
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        self.to_internal.remove(&id);
+                        return Ok(());
+                    }
+                }
             }
             stnet::RedirectorFrame::StartListener(id, port) => {
                 // Open a tunnel to the internal if needed

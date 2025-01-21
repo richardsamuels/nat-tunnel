@@ -224,10 +224,11 @@ where
             let to_client = self.to_client.clone();
             let to_tunnels = self.to_tunnels.clone();
             let port = *t;
+            let mtu = self.config.as_ref().mtu;
             let token = self.token.clone();
             let h = tokio::spawn(async move {
                 trace!(port = ?port, "external listener start");
-                let mut h = ExternalListener::new(port, token, to_tunnels, to_client);
+                let mut h = ExternalListener::new(port, mtu, token, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
@@ -254,13 +255,22 @@ where
         let ret = loop {
             // XXX You MUST NOT return in this loop
             tokio::select! {
-                // Redirect data from tunnel to client
                 maybe_rx = self.from_tunnels.recv() => {
                     let rframe = match maybe_rx {
                         None => break Ok(()),
                         Some(data) => data,
                     };
-                    self.transport.write_frame(rframe.into()).await?;
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.transport.write_frame(rframe.into())
+                    ).await {
+                        Ok(Ok(_)) => (),
+                        Ok(Err(e)) => break Err(e.into()),
+                        Err(_) => {
+                            error!("Write operation timed out");
+                            break Err(stnet::Error::ConnectionDead.into());
+                        }
+                    }
                 }
 
                 // Read from network
@@ -305,14 +315,19 @@ where
                 h.abort();
                 active_tunnels.remove(t);
             }
+            let mut tunnels = self.to_tunnels.lock().unwrap();
+            tunnels.clear();
         }
+
         self.transport.shutdown().await?;
+
         ret
     }
 }
 
 struct ExternalListener {
     remote_port: u16,
+    mtu: u16,
     token: CancellationToken,
     to_client: mpsc::Sender<stnet::RedirectorFrame>,
     tunnels: Arc<Mutex<TunnelChannels>>,
@@ -321,12 +336,14 @@ struct ExternalListener {
 impl ExternalListener {
     fn new(
         remote_port: u16,
+        mtu: u16,
         token: CancellationToken,
         tunnels: Arc<Mutex<TunnelChannels>>,
         to_client: mpsc::Sender<stnet::RedirectorFrame>,
     ) -> Self {
         ExternalListener {
             remote_port,
+            mtu,
             token,
             tunnels,
             to_client,
@@ -363,6 +380,7 @@ impl ExternalListener {
             }
 
             let port = self.remote_port;
+            let mtu = self.mtu;
             let to_client = self.to_client.clone();
             let tunnels = self.tunnels.clone();
             let token = self.token.clone();
@@ -370,6 +388,7 @@ impl ExternalListener {
                 let mut r = Redirector::with_stream(
                     external_addr,
                     port,
+                    mtu,
                     token,
                     external_stream,
                     to_client,

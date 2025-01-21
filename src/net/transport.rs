@@ -53,11 +53,16 @@ where
 
     pub async fn read_frame(&mut self) -> Result<Frame> {
         match self.framed.try_next().await {
-            Err(e) => Err(stnet::Error::Io {
-                message: "failed to read frame".to_string(),
-                source: e,
-                backtrace: snafu::Backtrace::capture(),
-            }),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    return Err(Error::ConnectionDead);
+                }
+                Err(stnet::Error::Io {
+                    message: "failed to read frame".to_string(),
+                    source: e,
+                    backtrace: snafu::Backtrace::capture(),
+                })
+            }
             Ok(None) => Err(Error::ConnectionDead),
             Ok(Some(frame)) => Ok(frame),
         }

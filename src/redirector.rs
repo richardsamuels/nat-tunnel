@@ -9,15 +9,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace, trace_span};
 
-// See tests/mtu.rs for explanation.
-// TODO parameterized base MTU
-pub const BUFFER_CAPACITY: usize = 1463;
+// See tests/mtu.rs for an explanation of this magic number
+pub const PROTOCOL_OVERHEAD: u16 = 53;
 
 /// Reads data from stream, and send it along the `tx` channel
 /// Reads data from rx chnnale, and send it along the stream
 pub struct Redirector<R, W> {
     id: SocketAddr,
     port: u16,
+    buffer_size: u16,
     token: CancellationToken,
     reader: BufReader<R>,
     writer: BufWriter<W>,
@@ -29,18 +29,28 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
     pub fn with_stream(
         id: SocketAddr,
         port: u16,
+        mtu: u16,
         token: CancellationToken,
         stream: tnet::TcpStream,
         tx: mpsc::Sender<stnet::RedirectorFrame>,
         rx: mpsc::Receiver<stnet::RedirectorFrame>,
     ) -> Self {
+        // Look, what we're really trying to do here is calculate
+        // MTU - PROTOCOL_OVERHEAD - (TCP/UDP Overhead) - Quic Overhead - TLS overhead
+        // But i'm way too lazy to plumb all the required info, so
+        // Let's just use 1330, since ipv6 + QUIC says 1330 per packet
+        // Citation: https://blog.apnic.net/2019/03/04/a-quick-look-at-quic/
+        //let buffer_size = mtu - PROTOCOL_OVERHEAD;
+        let buffer_size = 1330;
+
         let (reader, writer) = stream.into_split();
-        let reader = BufReader::with_capacity(BUFFER_CAPACITY, reader);
-        let writer = BufWriter::with_capacity(BUFFER_CAPACITY, writer);
+        let reader = BufReader::with_capacity(buffer_size as usize, reader);
+        let writer = BufWriter::with_capacity(buffer_size as usize, writer);
 
         Redirector {
             id,
             port,
+            buffer_size,
             token,
             tx,
             rx,
@@ -58,6 +68,7 @@ where
     pub fn new(
         id: SocketAddr,
         port: u16,
+        buffer_size: u16,
         token: CancellationToken,
         reader: BufReader<R>,
         writer: BufWriter<W>,
@@ -72,13 +83,14 @@ where
             writer,
             tx,
             rx,
+            buffer_size,
         }
     }
     pub async fn run(&mut self) {
         let span = trace_span!("tunnel start", addr = ?self.id);
         let _guard = span.enter();
 
-        let mut buf = [0u8; BUFFER_CAPACITY];
+        let mut buf = vec![0u8; self.buffer_size as usize];
         let mut last_activity = std::time::Instant::now();
         let keepalive = Duration::from_secs(300);
         let mut interval = tokio::time::interval(keepalive);
