@@ -14,7 +14,13 @@ use rustls_pemfile::{certs, rsa_private_keys};
 pub struct Config {
     pub psk: String,
     pub port: u16,
+    #[serde(default = "default_mtu")]
+    pub mtu: u16,
     pub crypto: Option<CryptoConfig>,
+}
+
+fn default_mtu() -> u16 {
+    1500
 }
 
 #[derive(Parser, Debug)]

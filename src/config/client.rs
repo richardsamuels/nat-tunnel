@@ -24,8 +24,14 @@ pub struct Config {
     pub psk: String,
     pub addr: String,
     pub port: u16,
+    #[serde(default = "default_mtu")]
+    pub mtu: u16,
     pub tunnels: Vec<Tunnel>,
     pub crypto: Option<CryptoConfig>,
+}
+
+fn default_mtu() -> u16 {
+    1500
 }
 
 impl Config {
