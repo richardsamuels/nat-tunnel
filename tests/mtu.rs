@@ -7,7 +7,9 @@ fn check_mtu() {
     // Default MTU is 1500 bytes. Calculate the size of the worst-case
     // overhead, i.e. a Datagram w/ an ipv6 address and verify the
     // PROTOCOL_OVERHEAD is set correctly
-    let ipv6_addr = Ipv6Addr::new(0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF);
+    let ipv6_addr = Ipv6Addr::new(
+        0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
+    );
 
     let d = Datagram {
         id: SocketAddr::new(IpAddr::V6(ipv6_addr), 65000),
