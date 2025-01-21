@@ -14,13 +14,22 @@ use rustls_pemfile::{certs, rsa_private_keys};
 pub struct Config {
     pub psk: String,
     pub port: u16,
-    #[serde(default = "default_mtu")]
+    #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
     pub crypto: Option<CryptoConfig>,
 }
 
 fn default_mtu() -> u16 {
     1500
+}
+
+fn warn_mtu<'de, D>(deserializer: D) -> std::result::Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u16::deserialize(deserializer)?;
+    eprintln!("Warning: mtu parameter is currently ignored.");
+    Ok(value)
 }
 
 #[derive(Parser, Debug)]

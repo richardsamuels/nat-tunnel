@@ -126,10 +126,13 @@ where
                 }
 
                 _ = self.token.cancelled() => {
+                    self.handlers.abort_all();
+                    self.transport.shutdown().await?;
                     break Ok(());
                 }
             }
         };
+        self.handlers.shutdown().await;
         self.transport.shutdown().await?;
         ret
     }
@@ -220,5 +223,9 @@ where
         }
 
         Ok(())
+    }
+
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.transport.shutdown().await.map_err(|e| e.into())
     }
 }
