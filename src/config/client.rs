@@ -11,7 +11,7 @@ use std::vec::Vec;
 use rustls::pki_types::CertificateDer;
 use rustls_pemfile::certs;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Tunnel {
     pub remote_port: u16,
     #[serde(default = "localhost_ipv4")]
@@ -19,7 +19,7 @@ pub struct Tunnel {
     pub local_port: u16,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub psk: String,
     pub addr: String,
@@ -35,7 +35,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CryptoConfig {
     #[serde(default = "localhost_ipv4")]
     pub sni_name: String,

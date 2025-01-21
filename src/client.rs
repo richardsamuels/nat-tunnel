@@ -126,11 +126,14 @@ where
                 }
 
                 _ = self.token.cancelled() => {
+                    error!("Cancellation requested");
+                    self.handlers.abort_all(); // Abort any remaining handlers
                     break Ok(());
                 }
             }
         };
         self.transport.shutdown().await?;
+        self.handlers.shutdown().await;
         ret
     }
 
@@ -196,5 +199,9 @@ where
         }
 
         Ok(())
+    }
+
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.transport.shutdown().await.map_err(|e| e.into())
     }
 }

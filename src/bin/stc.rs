@@ -28,19 +28,28 @@ async fn main() {
             maybe_run = run(c.clone(), token.clone(), &crypto_cfg) => {
                 match maybe_run {
                     Ok(_) => exit(0),
-                    e => {
-                        error!(cause = ?e, "client has failed.");
+                    Err(simple_tunnel::Error::ConnectionDead) => {
+                        if last_failure.elapsed() >= std::time::Duration::from_secs(5) {
+                            failures = 0;
+                        }
+                        last_failure = std::time::Instant::now();
                         failures += 1;
                         if failures >= 5 {
                             error!("client has failed 5 times in 5 seconds. Exiting");
                             exit(1);
                         }
-                        if last_failure.elapsed() >= std::time::Duration::from_secs(5) {
-                            failures = 1;
-                        }
-                        last_failure = std::time::Instant::now();
+                        error!(cause = ?e, "client has failed. attempting recovery");
+                    }
+                    Err(e) => {
+                        error!(cause = ?e, "client has failed with unrecoverable error");
+                        exit(1);
                     }
                 }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl-C, shutting down...");
+                token.cancel();
+                exit(0)
             }
         }
     }
@@ -77,11 +86,23 @@ async fn run(
             .expect("TLS initialization failed");
 
         info!("TLS enabled. All connections to the Server will be encrypted.");
-        let mut client = client::Client::new(c, token, client_stream);
-        client.run().await
+        let mut client = client::Client::new(c, token.clone(), client_stream);
+        tokio::select! {
+            res = client.run() => res,
+            _ = token.cancelled() => {
+                client.shutdown().await?;
+                Ok(())
+            }
+        }
     } else {
-        let mut client = client::Client::new(c, token, client_stream);
-        client.run().await
+        let mut client = client::Client::new(c, token.clone(), client_stream);
+        tokio::select! {
+            res = client.run() => res,
+            _ = token.cancelled() => {
+                client.shutdown().await?;
+                Ok(())
+            }
+        }
     }
 }
 
