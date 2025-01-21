@@ -1,4 +1,5 @@
 use clap::Parser;
+use simple_tunnel::net::Error;
 use simple_tunnel::Result;
 use simple_tunnel::{client, config::client as config};
 use std::process::exit;
@@ -28,7 +29,7 @@ async fn main() {
             maybe_run = run(c.clone(), token.clone(), &crypto_cfg) => {
                 match maybe_run {
                     Ok(_) => exit(0),
-                    Err(simple_tunnel::Error::ConnectionDead) => {
+                    Err(e) if matches!(e.downcast_ref(), Some(Error::ConnectionDead)) => {
                         if last_failure.elapsed() >= std::time::Duration::from_secs(5) {
                             failures = 0;
                         }
