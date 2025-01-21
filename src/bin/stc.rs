@@ -21,13 +21,25 @@ async fn main() {
         .map(|c| crypto_init(c).expect("failed to load cert files"));
 
     let token = CancellationToken::new();
-    tokio::select! {
-        maybe_run = run(c, token.clone(), &crypto_cfg ) => {
-            match maybe_run {
-                Ok(_) => exit(0),
-                e => {
-                    error!(cause = ?e, "client has failed.");
-                    exit(1);
+    let mut failures = 0;
+    let mut last_failure = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            maybe_run = run(c.clone(), token.clone(), &crypto_cfg) => {
+                match maybe_run {
+                    Ok(_) => exit(0),
+                    e => {
+                        error!(cause = ?e, "client has failed.");
+                        failures += 1;
+                        if failures >= 5 {
+                            error!("client has failed 5 times in 5 seconds. Exiting");
+                            exit(1);
+                        }
+                        if last_failure.elapsed() >= std::time::Duration::from_secs(5) {
+                            failures = 1;
+                        }
+                        last_failure = std::time::Instant::now();
+                    }
                 }
             }
         }
