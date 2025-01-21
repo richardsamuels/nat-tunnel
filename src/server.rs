@@ -259,7 +259,6 @@ where
                         None => break Ok(()),
                         Some(data) => data,
                     };
-                    // Add timeout for write operations
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         self.transport.write_frame(rframe.into())
