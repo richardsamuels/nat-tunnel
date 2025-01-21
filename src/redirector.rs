@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace, trace_span};
 
-pub const PROTOCOL_OVERHEAD: u16 = 37;
+pub const PROTOCOL_OVERHEAD: u16 = 53;
 
 /// Reads data from stream, and send it along the `tx` channel
 /// Reads data from rx chnnale, and send it along the stream
