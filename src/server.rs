@@ -319,6 +319,7 @@ where
         }
 
         self.transport.shutdown().await?;
+
         ret
     }
 }
