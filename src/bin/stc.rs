@@ -88,22 +88,10 @@ async fn run(
 
         info!("TLS enabled. All connections to the Server will be encrypted.");
         let mut client = client::Client::new(c, token.clone(), client_stream);
-        tokio::select! {
-            res = client.run() => res,
-            _ = token.cancelled() => {
-                client.shutdown().await?;
-                Ok(())
-            }
-        }
+        client.run().await
     } else {
         let mut client = client::Client::new(c, token.clone(), client_stream);
-        tokio::select! {
-            res = client.run() => res,
-            _ = token.cancelled() => {
-                client.shutdown().await?;
-                Ok(())
-            }
-        }
+        client.run().await
     }
 }
 
