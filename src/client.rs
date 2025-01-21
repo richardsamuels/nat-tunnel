@@ -156,11 +156,12 @@ where
 
         let to_server = self.to_server.clone();
         let token = self.token.clone();
+        let mtu = self.config.mtu;
         let (to_internal, from_internal) = mpsc::channel(16);
         self.to_internal.insert(id, to_internal);
         self.handlers.spawn(async move {
             let mut r =
-                Redirector::with_stream(id, port, token, internal_stream, to_server, from_internal);
+                Redirector::with_stream(id, port, mtu, token, internal_stream, to_server, from_internal);
             r.run().await;
             id
         });

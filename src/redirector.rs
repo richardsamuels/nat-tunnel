@@ -9,15 +9,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace, trace_span};
 
-// See tests/mtu.rs for explanation.
-// TODO parameterized base MTU
-pub const BUFFER_CAPACITY: usize = 1463;
+pub const PROTOCOL_OVERHEAD: u16 = 37;
 
 /// Reads data from stream, and send it along the `tx` channel
 /// Reads data from rx chnnale, and send it along the stream
 pub struct Redirector<R, W> {
     id: SocketAddr,
     port: u16,
+    mtu: u16,
     token: CancellationToken,
     reader: BufReader<R>,
     writer: BufWriter<W>,
@@ -29,18 +28,20 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
     pub fn with_stream(
         id: SocketAddr,
         port: u16,
+        mtu: u16,
         token: CancellationToken,
         stream: tnet::TcpStream,
         tx: mpsc::Sender<stnet::RedirectorFrame>,
         rx: mpsc::Receiver<stnet::RedirectorFrame>,
     ) -> Self {
         let (reader, writer) = stream.into_split();
-        let reader = BufReader::with_capacity(BUFFER_CAPACITY, reader);
-        let writer = BufWriter::with_capacity(BUFFER_CAPACITY, writer);
+        let reader = BufReader::with_capacity(mtu as usize, reader);
+        let writer = BufWriter::with_capacity(mtu as usize, writer);
 
         Redirector {
             id,
             port,
+            mtu: mtu - PROTOCOL_OVERHEAD,
             token,
             tx,
             rx,
@@ -58,6 +59,7 @@ where
     pub fn new(
         id: SocketAddr,
         port: u16,
+        mtu: u16,
         token: CancellationToken,
         reader: BufReader<R>,
         writer: BufWriter<W>,
@@ -72,13 +74,14 @@ where
             writer,
             tx,
             rx,
+            mtu,
         }
     }
     pub async fn run(&mut self) {
         let span = trace_span!("tunnel start", addr = ?self.id);
         let _guard = span.enter();
 
-        let mut buf = [0u8; BUFFER_CAPACITY];
+        let mut buf = vec![0u8; self.mtu as usize];
         let mut last_activity = std::time::Instant::now();
         let keepalive = Duration::from_secs(300);
         let mut interval = tokio::time::interval(keepalive);
