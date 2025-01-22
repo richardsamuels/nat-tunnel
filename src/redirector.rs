@@ -17,7 +17,6 @@ pub const PROTOCOL_OVERHEAD: u16 = 53;
 pub struct Redirector<R, W> {
     id: SocketAddr,
     port: u16,
-    buffer_size: u16,
     token: CancellationToken,
     reader: BufReader<R>,
     writer: BufWriter<W>,
@@ -29,7 +28,7 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
     pub fn with_stream(
         id: SocketAddr,
         port: u16,
-        mtu: u16,
+        _mtu: u16,
         token: CancellationToken,
         stream: tnet::TcpStream,
         tx: mpsc::Sender<stnet::RedirectorFrame>,
@@ -41,7 +40,7 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
         // Let's just use 1330, since ipv6 + QUIC says 1330 per packet
         // Citation: https://blog.apnic.net/2019/03/04/a-quick-look-at-quic/
         //let buffer_size = mtu - PROTOCOL_OVERHEAD;
-        let buffer_size = 1330;
+        let buffer_size = 1330 - PROTOCOL_OVERHEAD;
 
         let (reader, writer) = stream.into_split();
         let reader = BufReader::with_capacity(buffer_size as usize, reader);
@@ -50,7 +49,6 @@ impl Redirector<OwnedReadHalf, OwnedWriteHalf> {
         Redirector {
             id,
             port,
-            buffer_size,
             token,
             tx,
             rx,
@@ -68,7 +66,6 @@ where
     pub fn new(
         id: SocketAddr,
         port: u16,
-        buffer_size: u16,
         token: CancellationToken,
         reader: BufReader<R>,
         writer: BufWriter<W>,
@@ -83,27 +80,26 @@ where
             writer,
             tx,
             rx,
-            buffer_size,
         }
     }
     pub async fn run(&mut self) {
         let span = trace_span!("tunnel start", addr = ?self.id);
         let _guard = span.enter();
 
-        let mut buf = vec![0u8; self.buffer_size as usize];
         let mut last_activity = std::time::Instant::now();
         let keepalive = Duration::from_secs(300);
         let mut interval = tokio::time::interval(keepalive);
         loop {
             tokio::select! {
-                maybe_len = self.reader.read(&mut buf) => {
-                    let len = match maybe_len {
+                maybe_buf = self.reader.fill_buf() => {
+                    let buf = match maybe_buf {
                         Err(e) => {
                             error!(addr = ?self.id, cause = ?e, "failed to read from network");
                             break;
                         },
                         Ok(l) => l,
                     };
+                    let len = buf.len();
                     if len == 0 {
                         let _ = self.tx.send(stnet::RedirectorFrame::KillListener(self.id)).await;
                         trace!("read 0 bytes, ending redirector");
