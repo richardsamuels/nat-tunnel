@@ -119,7 +119,12 @@ where
                         None => continue,
                         Some(d) => d,
                     };
-                    if let Err(e) = self.transport.write_frame(data.into()).await {
+
+                    if let Err(e) = match tokio::time::timeout(std::time::Duration::from_secs(5), self.transport.write_frame(data.into())).await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(stnet::Error::Other { message: "write timeout".to_string(), backtrace: snafu::Backtrace::capture() })
+                    } {
                         error!(cause = ?e, "failed to write frame");
                         break Err(e.into());
                     };
@@ -189,17 +194,8 @@ where
                     }
                     Some(s) => s,
                 };
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    to_internal.send(frame),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => return Ok(()),
-                    Ok(Err(_)) => {
-                        self.to_internal.remove(&id);
-                        return Ok(());
-                    }
+                match to_internal.send(frame).await {
+                    Ok(_) => return Ok(()),
                     Err(_) => {
                         self.to_internal.remove(&id);
                         return Ok(());
