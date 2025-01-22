@@ -65,11 +65,11 @@ async fn run(
             .expect("TLS initialization failed");
 
         info!("TLS enabled. All connections to the Server will be encrypted.");
-        let mut client = client::Client::new(c, token, client_stream);
-        client.run().await
+        let mut client = client::Client::new(c, token, &client_stream);
+        client.run(client_stream).await
     } else {
-        let mut client = client::Client::new(c, token, client_stream);
-        client.run().await
+        let mut client = client::Client::new(c, token, &client_stream);
+        client.run(client_stream).await
     }
 }
 

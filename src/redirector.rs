@@ -12,7 +12,7 @@ use tracing::{error, trace, trace_span};
 // See tests/mtu.rs for an explanation of this magic number
 pub const PROTOCOL_OVERHEAD: u16 = 53;
 
-pub fn with_stream<R, W>(
+pub fn with_stream<T>(
     id: SocketAddr,
     port: u16,
     mtu: u16,
@@ -20,14 +20,13 @@ pub fn with_stream<R, W>(
 
     chan2net: mpsc::Receiver<stnet::RedirectorFrame>,
     net2chan: mpsc::Sender<stnet::RedirectorFrame>,
-    stream: tnet::TcpStream,
+    stream: T,
 ) -> (
     Redirect2Channel<OwnedReadHalf>,
     Redirect2Network<OwnedWriteHalf>,
 )
 where
-    R: AsyncRead + std::marker::Unpin,
-    W: AsyncWrite + std::marker::Unpin,
+    T: AsyncRead + std::marker::Unpin + AsyncWrite,
 {
     let (reader, writer) = stream.into_split();
 
@@ -63,7 +62,7 @@ where
         // Let's just use 1330, since ipv6 + QUIC says 1330 per packet
         // Citation: https://blog.apnic.net/2019/03/04/a-quick-look-at-quic/
         //let buffer_size = mtu - PROTOCOL_OVERHEAD;
-        let buffer_size = 1330;
+        let buffer_size = 1330 - PROTOCOL_OVERHEAD;
         let writer = BufWriter::with_capacity(buffer_size as usize, writer);
 
         Redirect2Network {
