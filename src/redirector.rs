@@ -20,7 +20,7 @@ pub fn with_stream<T>(
 
     chan2net: mpsc::Receiver<stnet::RedirectorFrame>,
     net2chan: mpsc::Sender<stnet::RedirectorFrame>,
-    stream: T,
+    stream: tnet::TcpStream,
 ) -> (
     Redirect2Channel<OwnedReadHalf>,
     Redirect2Network<OwnedWriteHalf>,

@@ -6,9 +6,9 @@ use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net as tnet;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug_span, error, info, trace};
@@ -17,10 +17,11 @@ pub struct Client<T> {
     config: config::Config,
     token: CancellationToken,
     peer_addr: SocketAddr,
+
     // Frames to send to the server
     to_server: mpsc::Sender<stnet::RedirectorFrame>,
     // Frames being received from to
-    from_internal: mpsc::Receiver<stnet::RedirectorFrame>,
+    from_internal: Option<mpsc::Receiver<stnet::RedirectorFrame>>,
 
     to_internal: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>>>,
 
@@ -37,14 +38,16 @@ where
         + std::marker::Unpin
         + std::os::fd::AsRawFd
         + futures::Stream
-        + futures::Sink<stnet::Frame>,
+        + futures::Sink<stnet::Frame>
+        + stnet::PeerAddr
+        + std::marker::Send,
 {
     pub fn new(config: config::Config, token: CancellationToken, stream: &T) -> Client<T> {
         let (tx, rx) = mpsc::channel(16);
 
-        let peer_addr = stream.peer_addr();
+        let peer_addr = stream.peer_addr().unwrap();
 
-        let to_internal = HashMap::new().into();
+        let to_internal = Arc::new(HashMap::new().into());
 
         Client {
             config,
@@ -53,26 +56,70 @@ where
             chan2net_handlers: JoinSet::new(),
             net2chan_handlers: JoinSet::new(),
             to_server: tx,
-            from_internal: rx,
+            from_internal: Some(rx),
             to_internal,
             phantom: std::marker::PhantomData,
         }
+    }
+
+    pub async fn push_tunnel_config<W, R>(
+        &mut self,
+        c2s: &mut Client2Server<W>,
+        s2c: &mut Server2Client<R>,
+    ) -> stnet::Result<()>
+    where
+        R: tokio::io::AsyncReadExt + std::marker::Unpin + futures::StreamExt,
+        W: tokio::io::AsyncWriteExt + std::marker::Unpin + futures::SinkExt<stnet::Frame>,
+    {
+        c2s.write_frame(Frame::Auth(self.config.psk.clone().into()))
+            .await?;
+
+        let frame = s2c.read_frame().await?;
+        let stnet::Frame::Auth(_) = frame else {
+            return Err(stnet::Error::ConnectionRefused.into());
+        };
+
+        let tunnels = self
+            .config
+            .tunnels
+            .iter()
+            .map(|tunnel| tunnel.remote_port)
+            .collect();
+        c2s.write_frame(Frame::Tunnels(tunnels)).await?;
+
+        let frame = s2c.read_frame().await?;
+        let stnet::Frame::Tunnels(_) = frame else {
+            return Err(stnet::Error::ConnectionRefused.into());
+        };
+        trace!("Pushed tunnel config to remote");
+        Ok(())
     }
 
     pub async fn run(&mut self, stream: T) -> Result<()> {
         // tokio spawn the handlers
         //
         //
-        let (sc, from_server_lm) = ServerComm::with_stream(
-            self.config.clone(),
-            self.token.clone(),
-            self.from_internal,
-            self.to_internal.clone(),
-            stream,
-        )?;
-        sc.push_tunnel_config().await?;
+        stnet::set_keepalive(&stream, true)
+            .expect("keepalive should be enabled on stream, but operation failed");
 
-        let (c2s, s2c) = sc.split();
+        let from_internal = self.from_internal.take().unwrap();
+
+        let (writer, reader) = stnet::frame(stream).split();
+        let (to_connman, mut from_server_lm) = mpsc::channel(16);
+        let mut c2s = Client2Server::with_sink(
+            self.peer_addr.clone(),
+            self.token.clone(),
+            from_internal,
+            writer,
+        );
+        let mut s2c = Server2Client::with_stream(
+            self.peer_addr,
+            self.token.clone(),
+            self.to_internal.clone(),
+            to_connman,
+            reader,
+        );
+        //sc.push_tunnel_config().await?;
 
         tokio::spawn(async move { c2s.run().await });
         tokio::spawn(async move { s2c.run().await });
@@ -205,77 +252,6 @@ where
         }
 
         Ok(())
-    }
-}
-
-struct ServerComm<W, R> {
-    c2s: Client2Server<W>,
-    s2c: Server2Client<R>,
-    config: config::Config,
-}
-
-impl<W, R> ServerComm<W, R>
-where
-    R: tokio::io::AsyncReadExt + std::marker::Unpin + futures::StreamExt,
-    W: tokio::io::AsyncWriteExt + std::marker::Unpin + futures::SinkExt<stnet::Frame>,
-{
-    pub async fn push_tunnel_config(&mut self) -> stnet::Result<()> {
-        self.c2s
-            .write_frame(Frame::Auth(self.config.psk.clone().into()))
-            .await?;
-
-        let frame = self.s2c.read_frame().await?;
-        let stnet::Frame::Auth(_) = frame else {
-            return Err(stnet::Error::ConnectionRefused.into());
-        };
-
-        let tunnels = self
-            .config
-            .tunnels
-            .iter()
-            .map(|tunnel| tunnel.remote_port)
-            .collect();
-        self.c2s.write_frame(Frame::Tunnels(tunnels)).await?;
-
-        let frame = self.s2c.read_frame().await?;
-        let stnet::Frame::Tunnels(_) = frame else {
-            return Err(stnet::Error::ConnectionRefused.into());
-        };
-        trace!("Pushed tunnel config to remote");
-        Ok(())
-    }
-
-    fn with_stream<T>(
-        config: config::Config,
-        token: CancellationToken,
-        from_internal: mpsc::Receiver<stnet::RedirectorFrame>,
-        to_internal: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>>>,
-        stream: T,
-    ) -> Result<(Self, mpsc::Receiver<stnet::Frame>)>
-    where
-        T: tokio::io::AsyncReadExt
-            + tokio::io::AsyncWriteExt
-            + std::marker::Unpin
-            + std::os::fd::AsRawFd
-            + futures::Stream
-            + futures::Sink<stnet::Frame>,
-    {
-        let peer_addr = stream.peer_addr();
-        stnet::set_keepalive(&stream, true)
-            .expect("keepalive should be enabled on stream, but operation failed");
-
-        let (writer, reader) = stnet::frame(stream).split();
-        let (to_connman, from_server_lm) = mpsc::channel(16);
-        let mut c2s =
-            Client2Server::with_sink(peer_addr.clone(), token.clone(), from_internal, writer);
-        let mut s2c =
-            Server2Client::with_stream(peer_addr, token.clone(), to_internal, to_connman, reader);
-        let mut out = ServerComm { config, c2s, s2c };
-        Ok((out, from_server_lm))
-    }
-
-    fn split(self) -> (Client2Server<W>, Server2Client<R>) {
-        (self.c2s, self.s2c)
     }
 }
 
