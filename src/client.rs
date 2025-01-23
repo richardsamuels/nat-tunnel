@@ -1,3 +1,4 @@
+use crate::net::reconnectable_err;
 use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -92,13 +93,13 @@ where
                 maybe_frame = self.transport.read_frame() => {
                     let frame = match maybe_frame {
                         Err(e) => {
-                            if reconnectable_err(&e) {
-                                error!(cause = ?e, "failed to read");
-                                break Err(stnet::Error::ConnectionDead.into());
-                            } else {
-                                error!(cause = ?e, "failed to read");
-                                break Err(e.into());
+                            error!(cause = ?e, "failed to read");
+                            if let stnet::Error::Io { ref source, .. } = e {
+                                if reconnectable_err(&source) {
+                                    break Err(stnet::Error::ConnectionDead.into());
+                                }
                             }
+                            break Err(e.into());
                         }
                         Ok(s) => s,
                     };
