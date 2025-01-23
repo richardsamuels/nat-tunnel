@@ -92,8 +92,13 @@ where
                 maybe_frame = self.transport.read_frame() => {
                     let frame = match maybe_frame {
                         Err(e) => {
-                            error!(cause = ?e, "failed to read");
-                            break Err(e.into());
+                            if reconnectable_err(&e) {
+                                error!(cause = ?e, "failed to read");
+                                break Err(stnet::Error::ConnectionDead.into());
+                            } else {
+                                error!(cause = ?e, "failed to read");
+                                break Err(e.into());
+                            }
                         }
                         Ok(s) => s,
                     };
