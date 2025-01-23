@@ -59,7 +59,7 @@ pub struct Datagram {
 }
 
 /// List of errors that imply the Client should try to reconnect to the Server
-pub(super) fn reconnectable_err(err: &futures::io::Error) -> bool {
+pub(crate) fn reconnectable_err(err: &futures::io::Error) -> bool {
     use futures::io::ErrorKind::*;
 
     match err.kind() {
