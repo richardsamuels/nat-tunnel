@@ -108,7 +108,7 @@ where
                         Frame::Heartbeat => {
                             info!("heartbeat received for server");
                             if let Err(e) = match tokio::time::timeout(std::time::Duration::from_secs(5), self.transport.write_frame(Frame::Heartbeat)).await {
-                                Ok(       Ok(_)) => Ok(()),
+                                Ok(Ok(_)) => Ok(()),
                                 Ok(Err(e)) => Err(e),
                                 Err(_) => Err(stnet::Error::Other { message: "write timeout".to_string(), backtrace: snafu::Backtrace::capture() })
                             } {
