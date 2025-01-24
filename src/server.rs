@@ -258,7 +258,7 @@ where
         };
         let handlers = self.make_tunnels().await?;
         let mut heartbeat_interval = time::interval(Duration::from_secs(60));
-        let mut last_recv_heartbeat = std::time::Instant::now();
+        let mut last_recv_heartbeat = std::time::Instant::now() + std::time::Duration::from_secs(60);
 
         let ret = loop {
             // XXX You MUST NOT return in this loop
@@ -315,7 +315,6 @@ where
                     match frame {
                         stnet::Frame::Heartbeat => {
                             last_recv_heartbeat = std::time::Instant::now();
-
                         }
 
                         stnet::Frame::Redirector(r) => {
