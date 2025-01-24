@@ -7,7 +7,7 @@ use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, info_span, trace, warn};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
 type ActiveTunnels = HashSet<u16>;
@@ -246,15 +246,39 @@ where
     }
 
     async fn run(&mut self) -> Result<()> {
+        use std::time::Duration;
+        use tokio::time;
+
+        let span = info_span!("client handler", addr = ?self.transport.peer_addr());
+        let _guard = span.enter();
+
         if let Err(e) = self.auth().await {
             error!(cause = ?e, "failed to authenticate client");
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
         };
         let handlers = self.make_tunnels().await?;
+        let mut heartbeat_interval = time::interval(Duration::from_secs(60));
+        let mut last_recv_heartbeat = std::time::Instant::now();
 
         let ret = loop {
             // XXX You MUST NOT return in this loop
             tokio::select! {
+                _maybe_interval = heartbeat_interval.tick() => {
+                    if last_recv_heartbeat.elapsed().as_secs() > 60 {
+                        error!("Missing heartbeat from client. Killing connection");
+                        break Err(stnet::Error::ConnectionDead.into());
+                    }
+
+                    if let Err(e) = match tokio::time::timeout(std::time::Duration::from_secs(5), self.transport.write_frame(stnet::Frame::Heartbeat)).await {
+                        Ok(       Ok(_)) => Ok(()),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(stnet::Error::Other { message: "write timeout".to_string(), backtrace: snafu::Backtrace::capture() })
+                    } {
+                        error!(cause = ?e, "failed to write frame");
+                        break Err(e.into());
+                    };
+                }
+
                 maybe_rx = self.from_tunnels.recv() => {
                     let rframe = match maybe_rx {
                         None => break Ok(()),
@@ -289,6 +313,11 @@ where
                         Ok(f) => f,
                     };
                     match frame {
+                        stnet::Frame::Heartbeat => {
+                            last_recv_heartbeat = std::time::Instant::now();
+
+                        }
+
                         stnet::Frame::Redirector(r) => {
                             let id = r.id();
                             match self.get_tunnel_tx(*id) {
