@@ -20,7 +20,7 @@ pub struct Client<T> {
     handlers: JoinSet<SocketAddr>,
 }
 
-impl<'a, T> Client<T>
+impl<T> Client<T>
 where
     T: tokio::io::AsyncReadExt
         + tokio::io::AsyncWriteExt
@@ -95,7 +95,7 @@ where
                         Err(e) => {
                             error!(cause = ?e, "failed to read");
                             if let stnet::Error::Io { ref source, .. } = e {
-                                if reconnectable_err(&source) {
+                                if reconnectable_err(source) {
                                     break Err(stnet::Error::ConnectionDead.into());
                                 }
                             }
@@ -105,7 +105,12 @@ where
                     };
 
                     match frame {
+                        Frame::Heartbeat => {
+                            trace!("heartbeat received from server");
+                            self.transport.write_frame(Frame::Heartbeat).await?
+                        }
                         Frame::Kthxbai => {
+                            info!("Server is shutting down");
                             break Ok(());
                         }
                         Frame::Redirector(r) => {
@@ -116,7 +121,7 @@ where
                         f => {
                             trace!(frame = ?f, addr = ?self.transport.peer_addr(), "received unexpected frame");
                         }
-                    }
+                    };
                 }
 
                 // We have some data to send from a tunnel to the client
@@ -126,18 +131,12 @@ where
                         Some(d) => d,
                     };
 
-                    if let Err(e) = match tokio::time::timeout(std::time::Duration::from_secs(5), self.transport.write_frame(data.into())).await {
-                        Ok(Ok(_)) => Ok(()),
-                        Ok(Err(e)) => Err(e),
-                        Err(_) => Err(stnet::Error::Other { message: "write timeout".to_string(), backtrace: snafu::Backtrace::capture() })
-                    } {
-                        error!(cause = ?e, "failed to write frame");
-                        break Err(e.into());
-                    };
+                    self.transport.write_frame(data.into()).await?
                 }
 
                 _ = self.token.cancelled() => {
                     self.handlers.abort_all();
+                    self.transport.write_frame(Frame::Kthxbai).await?;
                     self.transport.shutdown().await?;
                     break Ok(());
                 }
@@ -192,7 +191,7 @@ where
     async fn redirector_frame(&mut self, frame: stnet::RedirectorFrame) -> Result<()> {
         match frame {
             stnet::RedirectorFrame::Datagram(ref _d) => {
-                let id = frame.id().clone();
+                let id = *frame.id();
                 let to_internal = match self.to_internal.get(&id) {
                     None => {
                         error!(id = ?id,"no channel");
@@ -225,9 +224,5 @@ where
         }
 
         Ok(())
-    }
-
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.transport.shutdown().await.map_err(|e| e.into())
     }
 }

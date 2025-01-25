@@ -5,9 +5,10 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, info_span, trace, warn};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
 type ActiveTunnels = HashSet<u16>;
@@ -19,6 +20,7 @@ pub struct Server {
     active_tunnels: Arc<Mutex<ActiveTunnels>>,
 
     tls: Option<TlsAcceptor>,
+    handlers: JoinSet<()>,
 }
 
 #[derive(Snafu, Debug)]
@@ -65,7 +67,15 @@ impl Server {
             listener,
             active_tunnels: Arc::new(ActiveTunnels::new().into()),
             tls: acceptor,
+            handlers: JoinSet::new(),
         })
+    }
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.token.cancel();
+        while self.handlers.join_next().await.is_some() {
+            // intentionally blank
+        }
+        Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -75,12 +85,20 @@ impl Server {
             warn!("TLS *DISABLED*. All data is transmitted in the clear.");
         }
         loop {
-            let (socket, addr) = match self.listener.accept().await {
-                Err(e) => {
-                    error!(cause = ?e, "Failed to accept new client");
-                    continue;
+            let (socket, addr) = tokio::select! {
+                maybe_accept = self.listener.accept() => {
+                    match maybe_accept {
+                        Err(e) => {
+                            error!(cause = ?e, "Failed to accept new client");
+                            continue;
+                        }
+                        Ok(s) => s,
+                    }
                 }
-                Ok(s) => s,
+
+                _ = self.token.cancelled() => {
+                    return Ok(())
+                }
             };
             socket
                 .set_nodelay(true)
@@ -98,7 +116,7 @@ impl Server {
                     }
                     Ok(socket) => socket,
                 };
-                tokio::spawn(async move {
+                self.handlers.spawn(async move {
                     trace!(addr = ?addr, "client handler start");
                     let mut h = ClientHandler::new(c, token, active_tunnels, socket);
                     if let Err(e) = h.run().await {
@@ -107,7 +125,7 @@ impl Server {
                     trace!(addr = ?addr, "client handler end");
                 });
             } else {
-                tokio::spawn(async move {
+                self.handlers.spawn(async move {
                     trace!(addr = ?addr, "client handler start");
                     let mut h = ClientHandler::new(c, token, active_tunnels, socket);
                     if let Err(e) = h.run().await {
@@ -246,15 +264,39 @@ where
     }
 
     async fn run(&mut self) -> Result<()> {
+        use std::time::Duration;
+        use tokio::time;
+
+        let span = info_span!("client handler", addr = ?self.transport.peer_addr().unwrap());
+        let _guard = span.enter();
+
         if let Err(e) = self.auth().await {
             error!(cause = ?e, "failed to authenticate client");
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
         };
         let handlers = self.make_tunnels().await?;
+        let mut heartbeat_interval = time::interval(Duration::from_secs(60));
+        // SAFETY: this resolves immediately
+        heartbeat_interval.tick().await;
+        let mut last_recv_heartbeat =
+            std::time::Instant::now() + std::time::Duration::from_secs(60);
 
         let ret = loop {
             // XXX You MUST NOT return in this loop
             tokio::select! {
+                _maybe_interval = heartbeat_interval.tick() => {
+                    if last_recv_heartbeat.elapsed().as_secs() > 60 {
+                        error!("Missing heartbeat from client. Killing connection");
+                        break Err(stnet::Error::ConnectionDead.into());
+                    }
+
+                    if let Err(e) = self.transport.write_frame(stnet::Frame::Heartbeat).await {
+                        error!(e = ?e, "failed to send heartbeat");
+                        break Err(e.into());
+                    }
+                    trace!("sent heartbeat to client");
+                }
+
                 maybe_rx = self.from_tunnels.recv() => {
                     let rframe = match maybe_rx {
                         None => break Ok(()),
@@ -280,7 +322,6 @@ where
                         Err(stnet::Error::ConnectionDead) => {
                             error!(addr = ?self.transport.peer_addr(), "connection is dead");
                             break Err(stnet::Error::ConnectionDead.into())
-
                         },
                         Err(e) => {
                             error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed reading frame from network");
@@ -289,22 +330,35 @@ where
                         Ok(f) => f,
                     };
                     match frame {
+                        stnet::Frame::Heartbeat => {
+                            trace!("heartbeat received from client");
+                            last_recv_heartbeat = std::time::Instant::now();
+                        }
+
                         stnet::Frame::Redirector(r) => {
                             let id = r.id();
                             match self.get_tunnel_tx(*id) {
-                                None => trace!(addr = ?id, "no channel for port. connection already killed?"),
+                                None => error!(addr = ?id, "no channel for port. connection already killed?"),
                                 Some(tx) => tx.send(r).await?,
                             }
                         }
 
-                        stnet::Frame::Kthxbai => break Ok(()),
+                        stnet::Frame::Kthxbai => {
+                            info!("client will shutdown");
+                            break Ok(())
+                        }
+
                         f => {
                             error!(frame = ?f, "unexpected frame");
                         }
                     };
                 }
 
-                _ = self.token.cancelled() => break Ok(())
+                _ = self.token.cancelled() => {
+                    self.transport.write_frame(stnet::Frame::Kthxbai).await?;
+                    info!("Shutting down client connection");
+                    break Ok(())
+                }
             }
         };
 

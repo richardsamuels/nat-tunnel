@@ -33,6 +33,7 @@ pub enum Frame {
     Redirector(RedirectorFrame),
     ListenerEnd(SocketAddr),
     Kthxbai,
+    Heartbeat,
 }
 
 impl std::convert::From<Datagram> for Frame {

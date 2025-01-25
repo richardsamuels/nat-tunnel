@@ -5,6 +5,7 @@ use futures::{SinkExt, TryStreamExt};
 use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio_util::codec;
+use tracing::error;
 
 use std::marker::Unpin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -69,18 +70,28 @@ where
     }
 
     pub async fn write_frame(&mut self, t: Frame) -> Result<()> {
-        match self.framed.send(t).await {
-            Err(e) if reconnectable_err(&e) => {
+        let future =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.framed.send(t)).await;
+
+        match future {
+            Err(_) => {
+                error!("write timeout");
+                return Err(stnet::Error::Other {
+                    message: "write timeout".to_string(),
+                    backtrace: snafu::Backtrace::capture(),
+                });
+            }
+            Ok(Err(e)) if reconnectable_err(&e) => {
                 return Err(Error::ConnectionDead);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 return Err(stnet::Error::Io {
                     message: "failed to write frame".to_string(),
                     source: e,
                     backtrace: snafu::Backtrace::capture(),
                 })
             }
-            Ok(()) => (),
+            Ok(Ok(_)) => (),
         };
 
         // XXX Flush MUST be called here. See tokio_rustls docs:

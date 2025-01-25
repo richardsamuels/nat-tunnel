@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tnet::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::io::AsyncBufReadExt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
