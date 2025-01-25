@@ -24,6 +24,17 @@ async fn main() {
     let token = CancellationToken::new();
     let mut failures = 0;
     let mut last_failure = std::time::Instant::now();
+
+    // Spawn a separate task to handle SIGINT
+    let shutdown_token = token.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for event");
+        info!("Received SIGINT, shutting down...");
+        shutdown_token.cancel();
+    });
+
     loop {
         tokio::select! {
             maybe_run = run(c.clone(), token.clone(), &crypto_cfg) => {
@@ -46,11 +57,6 @@ async fn main() {
                         exit(1);
                     }
                 }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Received Ctrl-C, shutting down...");
-                token.cancel();
-                exit(0)
             }
         }
     }

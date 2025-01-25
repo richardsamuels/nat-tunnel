@@ -95,7 +95,7 @@ where
                         Err(e) => {
                             error!(cause = ?e, "failed to read");
                             if let stnet::Error::Io { ref source, .. } = e {
-                                if reconnectable_err(&source) {
+                                if reconnectable_err(source) {
                                     break Err(stnet::Error::ConnectionDead.into());
                                 }
                             }
@@ -106,17 +106,11 @@ where
 
                     match frame {
                         Frame::Heartbeat => {
-                            info!("heartbeat received for server");
-                            if let Err(e) = match tokio::time::timeout(std::time::Duration::from_secs(5), self.transport.write_frame(Frame::Heartbeat)).await {
-                                Ok(Ok(_)) => Ok(()),
-                                Ok(Err(e)) => Err(e),
-                                Err(_) => Err(stnet::Error::Other { message: "write timeout".to_string(), backtrace: snafu::Backtrace::capture() })
-                            } {
-                                error!(cause = ?e, "failed to write frame");
-                                break Err(e.into());
-                            };
+                            trace!("heartbeat received from server");
+                            self.transport.write_frame(Frame::Heartbeat).await?
                         }
                         Frame::Kthxbai => {
+                            info!("Server is shutting down");
                             break Ok(());
                         }
                         Frame::Redirector(r) => {
@@ -137,18 +131,12 @@ where
                         Some(d) => d,
                     };
 
-                    if let Err(e) = match tokio::time::timeout(std::time::Duration::from_secs(5), self.transport.write_frame(data.into())).await {
-                        Ok(Ok(_)) => Ok(()),
-                        Ok(Err(e)) => Err(e),
-                        Err(_) => Err(stnet::Error::Other { message: "write timeout".to_string(), backtrace: snafu::Backtrace::capture() })
-                    } {
-                        error!(cause = ?e, "failed to write frame");
-                        break Err(e.into());
-                    };
+                    self.transport.write_frame(data.into()).await?
                 }
 
                 _ = self.token.cancelled() => {
                     self.handlers.abort_all();
+                    self.transport.write_frame(Frame::Kthxbai).await?;
                     self.transport.shutdown().await?;
                     break Ok(());
                 }

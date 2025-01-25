@@ -23,7 +23,10 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         ret = transport.run() => return ret,
-        _ = tokio::signal::ctrl_c() => token.cancel()
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received SIGINT. Terminating all connections and shutting down...");
+            transport.shutdown().await?;
+        }
     };
     Ok(())
 }
