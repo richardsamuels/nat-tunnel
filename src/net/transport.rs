@@ -73,8 +73,7 @@ where
         let future =
             tokio::time::timeout(std::time::Duration::from_secs(5), self.framed.send(t)).await;
 
-        let send_res = match future {
-            Ok(x) => x,
+        match future {
             Err(_) => {
                 error!("write timeout");
                 return Err(stnet::Error::Other {
@@ -82,20 +81,17 @@ where
                     backtrace: snafu::Backtrace::capture(),
                 });
             }
-        };
-
-        match send_res {
-            Err(e) if reconnectable_err(&e) => {
+            Ok(Err(e)) if reconnectable_err(&e) => {
                 return Err(Error::ConnectionDead);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 return Err(stnet::Error::Io {
                     message: "failed to write frame".to_string(),
                     source: e,
                     backtrace: snafu::Backtrace::capture(),
                 })
             }
-            Ok(_) => (),
+            Ok(Ok(_)) => (),
         };
 
         // XXX Flush MUST be called here. See tokio_rustls docs:
