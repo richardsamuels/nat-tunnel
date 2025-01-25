@@ -20,7 +20,7 @@ pub struct Client<T> {
     handlers: JoinSet<SocketAddr>,
 }
 
-impl<'a, T> Client<T>
+impl<T> Client<T>
 where
     T: tokio::io::AsyncReadExt
         + tokio::io::AsyncWriteExt
@@ -191,7 +191,7 @@ where
     async fn redirector_frame(&mut self, frame: stnet::RedirectorFrame) -> Result<()> {
         match frame {
             stnet::RedirectorFrame::Datagram(ref _d) => {
-                let id = frame.id().clone();
+                let id = *frame.id();
                 let to_internal = match self.to_internal.get(&id) {
                     None => {
                         error!(id = ?id,"no channel");
@@ -224,9 +224,5 @@ where
         }
 
         Ok(())
-    }
-
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.transport.shutdown().await.map_err(|e| e.into())
     }
 }
