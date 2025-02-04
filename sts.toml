@@ -1,5 +1,5 @@
 psk = "abcd"
-port = 12345
+addr = "127.0.0.1:12345"
 
 [crypto]
 key = "tests/server.key.pem"

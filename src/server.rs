@@ -8,20 +8,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, trace, warn};
+use tracing::{error, info, trace, warn};
 
 type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
 type ActiveTunnels = HashSet<u16>;
-
-pub struct Server {
-    config: Arc<config::Config>,
-    token: CancellationToken,
-    listener: tnet::TcpListener,
-    active_tunnels: Arc<Mutex<ActiveTunnels>>,
-
-    tls: Option<TlsAcceptor>,
-    handlers: JoinSet<()>,
-}
 
 #[derive(Snafu, Debug)]
 enum ClientValidationError {
@@ -31,7 +21,7 @@ enum ClientValidationError {
     DuplicateTunnels { tunnels: Vec<u16> },
     #[snafu(display("Incorrect PSK from client"))]
     IncorrectPSK,
-    #[snafu(display("transport error"))]
+    #[snafu(display("transport error: {source}"))]
     TransportError { source: stnet::Error },
 }
 
@@ -42,6 +32,16 @@ impl std::convert::From<stnet::Error> for ClientValidationError {
 }
 
 type ClientResult<T> = std::result::Result<T, ClientValidationError>;
+
+pub struct Server {
+    config: Arc<config::Config>,
+    token: CancellationToken,
+    listener: tnet::TcpListener,
+    active_tunnels: Arc<Mutex<ActiveTunnels>>,
+
+    tls: Option<TlsAcceptor>,
+    handlers: JoinSet<()>,
+}
 
 impl Server {
     pub fn new(
@@ -78,6 +78,7 @@ impl Server {
         Ok(())
     }
 
+    #[tracing::instrument(name = "Supervisor", level = "info", skip_all)]
     pub async fn run(&mut self) -> Result<()> {
         if self.tls.is_some() {
             info!("TLS enabled. All connections to Clients will be encrypted.");
@@ -100,34 +101,43 @@ impl Server {
                     return Ok(())
                 }
             };
-            socket
-                .set_nodelay(true)
-                .expect("Could not set TCP_NODELAY on socket");
-
-            let c = self.config.clone();
-            let active_tunnels = self.active_tunnels.clone();
-            let token = self.token.clone();
+            if let Err(e) = socket.set_nodelay(true) {
+                error!(e=?e, "Failed to set TCP_NODELAY on socket");
+                continue;
+            };
 
             if let Some(tls) = &self.tls {
+                let peer_addr = socket.peer_addr().expect("ip");
                 let socket = match tls.accept(socket).await {
                     Err(e) => {
-                        error!(cause = ?e, addr = ?addr, "client connection dropped");
+                        error!(cause = ?e, addr = ?addr, "client connection dropped (failed to negotiate TLS)");
                         continue;
                     }
-                    Ok(socket) => socket,
+                    Ok(socket) => Box::new(socket),
                 };
+                let mut h = ClientHandler::new(
+                    self.config.clone(),
+                    self.token.clone(),
+                    self.active_tunnels.clone(),
+                    (peer_addr, socket),
+                );
                 self.handlers.spawn(async move {
                     trace!(addr = ?addr, "client handler start");
-                    let mut h = ClientHandler::new(c, token, active_tunnels, socket);
                     if let Err(e) = h.run().await {
                         error!(cause = ?e, addr = ?addr, "client connection dropped");
                     }
                     trace!(addr = ?addr, "client handler end");
                 });
             } else {
+                let peer_addr = socket.peer_addr().expect("ip");
+                let mut h = ClientHandler::new(
+                    self.config.clone(),
+                    self.token.clone(),
+                    self.active_tunnels.clone(),
+                    (peer_addr, Box::new(socket)),
+                );
                 self.handlers.spawn(async move {
                     trace!(addr = ?addr, "client handler start");
-                    let mut h = ClientHandler::new(c, token, active_tunnels, socket);
                     if let Err(e) = h.run().await {
                         error!(cause = ?e, addr = ?addr, "client connection dropped");
                     }
@@ -140,12 +150,9 @@ impl Server {
 
 struct ClientHandler<T>
 where
-    T: tokio::io::AsyncReadExt
-        + tokio::io::AsyncWriteExt
-        + std::marker::Unpin
-        + stnet::PeerAddr
-        + std::os::fd::AsRawFd,
+    T: stnet::Stream,
 {
+    peer_addr: stnet::StreamId,
     config: Arc<config::Config>,
     token: CancellationToken,
 
@@ -160,20 +167,18 @@ where
 
 impl<T> ClientHandler<T>
 where
-    T: tokio::io::AsyncReadExt
-        + tokio::io::AsyncWriteExt
-        + std::marker::Unpin
-        + stnet::PeerAddr
-        + std::os::fd::AsRawFd,
+    T: stnet::Stream,
 {
     fn new(
         config: Arc<config::Config>,
         token: CancellationToken,
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
-        stream: T,
+        stream: stnet::AcceptedStream<T>,
     ) -> ClientHandler<T> {
         let (tx, rx) = mpsc::channel(128);
+        let (peer_addr, stream) = stream;
         ClientHandler {
+            peer_addr,
             transport: stnet::Transport::new(stream),
             token,
             active_tunnels,
@@ -186,7 +191,7 @@ where
 
     /// Validate the client and create external listeners
     async fn auth(&mut self) -> ClientResult<()> {
-        info!(addr = ?self.transport.peer_addr(), "accepted connection from client");
+        info!(addr = ?self.peer_addr, "accepted connection from client");
 
         let frame = self.transport.read_frame().await?;
         {
@@ -194,9 +199,28 @@ where
                 stnet::Frame::Auth(ref auth) => auth,
                 _ => return Err(stnet::Error::UnexpectedFrame.into()),
             };
+            use argon2::{
+                password_hash::{PasswordHasher, PasswordVerifier, SaltString},
+                Argon2,
+            };
+            let argon2 = Argon2::default();
 
-            // TODO: constant time compare required.
-            if self.config.psk != auth.0 {
+            // We do a quick hack job of hashing the psk so that the psk lengths
+            // are guaranteed to be the same and then use verify_password
+            // to perform constant time comparison. If we didn't do this,
+            // constant_time_eq would return false immediately on dissimilar
+            // lengths, which could lead to timing attacks
+            //
+            // TODO We should probably support encoding the PSK on disk as
+            // a PHC string with randomly generated salt.
+            let lolsalt = SaltString::from_b64("dontcaredontcaredontcare").unwrap();
+            let our_hash = argon2
+                .hash_password(self.config.psk.as_bytes(), &lolsalt)
+                .map_err(|_| ClientValidationError::IncorrectPSK)?;
+            if argon2
+                .verify_password(auth.0.as_bytes(), &our_hash)
+                .is_err()
+            {
                 return Err(ClientValidationError::IncorrectPSK);
             }
         }
@@ -263,12 +287,10 @@ where
         to_tunnels.get(&id).cloned()
     }
 
+    #[tracing::instrument(name = "Server", level = "info", skip_all)]
     async fn run(&mut self) -> Result<()> {
         use std::time::Duration;
         use tokio::time;
-
-        let span = info_span!("client handler", addr = ?self.transport.peer_addr().unwrap());
-        let _guard = span.enter();
 
         if let Err(e) = self.auth().await {
             error!(cause = ?e, "failed to authenticate client");
@@ -276,7 +298,9 @@ where
         };
         let handlers = self.make_tunnels().await?;
         let mut heartbeat_interval = time::interval(Duration::from_secs(60));
-        // SAFETY: this resolves immediately
+        // SAFETY: The first .tick() resolves immediately. This ensures
+        // that when the loop starts, the next time this interval ticks is
+        // 60 seconds from now
         heartbeat_interval.tick().await;
         let mut last_recv_heartbeat =
             std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -320,11 +344,11 @@ where
                     trace!(frame = ?maybe_frame, "FRAME");
                     let frame = match maybe_frame {
                         Err(stnet::Error::ConnectionDead) => {
-                            error!(addr = ?self.transport.peer_addr(), "connection is dead");
+                            error!(addr = ?self.peer_addr, "connection is dead");
                             break Err(stnet::Error::ConnectionDead.into())
                         },
                         Err(e) => {
-                            error!(cause = ?e, addr = ?self.transport.peer_addr(), "failed reading frame from network");
+                            error!(cause = ?e, addr = ?self.peer_addr, "failed reading frame from network");
                             break Err(e.into())
                         }
                         Ok(f) => f,
@@ -336,6 +360,11 @@ where
                         }
 
                         stnet::Frame::Redirector(r) => {
+                            if let stnet::RedirectorFrame::KillListener(ref id) = r {
+                                let mut to_tunnels = self.to_tunnels.lock().unwrap();
+                                to_tunnels.remove(id);
+                                continue
+                            }
                             let id = r.id();
                             match self.get_tunnel_tx(*id) {
                                 None => error!(addr = ?id, "no channel for port. connection already killed?"),
@@ -372,9 +401,6 @@ where
             let mut tunnels = self.to_tunnels.lock().unwrap();
             tunnels.clear();
         }
-
-        self.transport.shutdown().await?;
-
         ret
     }
 }
@@ -403,7 +429,10 @@ impl ExternalListener {
             to_client,
         }
     }
+
+    #[tracing::instrument(name = "External", level = "info", skip_all)]
     async fn run(&mut self) -> Result<()> {
+        // TODO support more protocols, including TCP+TLS/QUIC
         let external_listener =
             tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
         loop {

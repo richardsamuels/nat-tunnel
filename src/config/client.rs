@@ -1,33 +1,44 @@
-use crate::net as stnet;
 use crate::Result;
-use clap::Parser;
+use rustls::pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
 
-use rustls::pki_types::CertificateDer;
-use rustls_pemfile::certs;
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Tunnel {
-    pub remote_port: u16,
-    #[serde(default = "localhost_ipv4")]
-    pub local_hostname: String,
-    pub local_port: u16,
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
+    #[serde(deserialize_with = "de_psk")]
     pub psk: String,
     pub addr: String,
-    pub port: u16,
     #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
-    pub tunnels: Vec<Tunnel>,
+    #[serde(deserialize_with = "de_tunnels")]
+    pub tunnels: HashMap<u16, Tunnel>,
     pub crypto: Option<CryptoConfig>,
+}
+
+fn de_tunnels<'de, D>(deserializer: D) -> std::result::Result<HashMap<u16, Tunnel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let tunnels: Vec<Tunnel> = Vec::<Tunnel>::deserialize(deserializer)?;
+    let tunnel_map: HashMap<_, _> = tunnels.into_iter().map(|c| (c.remote_port, c)).collect();
+    Ok(tunnel_map)
+}
+
+fn de_psk<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let psk: String = String::deserialize(deserializer)?;
+    if psk.is_empty() || psk.len() > 512 {
+        return Err(serde::de::Error::custom(
+            "psk must be non-empty and at most 512 bytes long",
+        ));
+    }
+    Ok(psk)
 }
 
 fn default_mtu() -> u16 {
@@ -43,22 +54,53 @@ where
     Ok(value)
 }
 
-impl Config {
-    /// Lookup `local_port` for a given `remote_port`
-    pub fn tunnel(&self, remote_port: u16) -> Option<&Tunnel> {
-        self.tunnels.iter().find(|t| t.remote_port == remote_port)
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CryptoConfig {
-    #[serde(default = "localhost_ipv4")]
+    #[serde(default = "localhost_ipv4", deserialize_with = "de_sni_name")]
     pub sni_name: String,
+    #[serde(deserialize_with = "de_ca_file")]
     pub ca: Option<PathBuf>,
+}
+
+fn de_sni_name<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let sni_name: String = String::deserialize(deserializer)?;
+    if rustls::pki_types::ServerName::try_from(sni_name.clone()).is_err() {
+        return Err(serde::de::Error::custom(
+            "sni_name invalid. expected IP address or hostname",
+        ));
+    }
+    Ok(sni_name)
+}
+
+fn de_ca_file<'de, D>(deserializer: D) -> std::result::Result<Option<PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path: Option<PathBuf> = Option::<PathBuf>::deserialize(deserializer)?;
+    if let Some(ref p) = path {
+        if !p.exists() {
+            return Err(serde::de::Error::custom(format!(
+                "CA file does not exist: {:?}",
+                p
+            )));
+        }
+    }
+    Ok(path)
 }
 
 fn localhost_ipv4() -> String {
     "127.0.0.1".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Tunnel {
+    pub remote_port: u16,
+    #[serde(default = "localhost_ipv4")]
+    pub local_hostname: String,
+    pub local_port: u16,
 }
 
 #[derive(Debug)]
@@ -71,66 +113,26 @@ impl Crypto {
         Self::new(&cfg.ca)
     }
 
-    fn new<P: AsRef<Path> + std::fmt::Debug>(ca: &Option<P>) -> Result<Crypto> {
-        use std::fs::File;
-        use std::io::BufReader;
+    fn new<P: AsRef<Path> + std::fmt::Debug>(ca_file: &Option<P>) -> Result<Crypto> {
+        use rustls_pki_types::{pem::PemObject, CertificateDer};
 
-        let ca_: Vec<_> = match ca {
+        let ca: Vec<_> = match ca_file {
             None => Vec::new(),
-            Some(ca) => {
-                let ca_fh = File::open(ca).context(stnet::IoSnafu {
-                    message: "failed to read ca file",
-                })?;
-
-                certs(&mut BufReader::new(ca_fh))
-                    .filter_map(|x| x.ok())
-                    .collect()
-            }
+            Some(ca_file) => CertificateDer::pem_file_iter(ca_file)
+                .with_context(|_| crate::config::CertificateSnafu {})?
+                .filter_map(|x| x.ok())
+                .collect(),
         };
-        Ok(Crypto { ca: ca_ })
+        Ok(Crypto { ca })
     }
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-pub struct Args {
-    #[arg(short, long, default_value = "./stc.toml")]
-    pub config: PathBuf,
-}
+pub fn load_config(config: &Path) -> crate::config::Result<Config> {
+    let config_contents = read_to_string(config).with_context(|_| crate::config::IoSnafu {
+        message: format!("failed to read config file '{:?}'", config),
+    })?;
 
-pub fn load_config(config: &Path) -> Config {
-    let config_contents = match read_to_string(config) {
-        Ok(args) => args,
-        Err(e) => panic!("Failed to read config file '{:?}'. Error: {}", &config, e),
-    };
-
-    let c: Config = match toml::from_str(&config_contents) {
-        Ok(c) => c,
-        Err(e) => panic!("Failed to parse config file '{:?}'.\n{}", config, e),
-    };
-
-    if c.psk.len() > 512 || c.psk.is_empty() {
-        panic!("psk length must be (0, 512] bytes");
-    }
-    if c.addr.is_empty() {
-        panic!("addr must not be empty");
-    }
-
-    if c.crypto.is_some() {
-        rustls::pki_types::ServerName::try_from(c.crypto.as_ref().unwrap().sni_name.clone())
-            .expect("sni_name must be a valid DNS name or IP address");
-    }
-
-    let mut temp = HashSet::new();
-    for t in &c.tunnels {
-        if temp.contains(&t.remote_port) {
-            panic!(
-                "Configuration file contains duplicate remote_ports: {}",
-                t.remote_port
-            );
-        }
-        temp.insert(t.remote_port);
-    }
-
-    c
+    let c: Config =
+        toml::from_str(&config_contents).with_context(|_| crate::config::DecodeSnafu {})?;
+    Ok(c)
 }

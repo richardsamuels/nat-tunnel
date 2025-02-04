@@ -1,22 +1,32 @@
 use clap::Parser;
 use color_eyre::eyre::Result;
 use simple_tunnel::{config::server as config, server};
-use std::net::SocketAddr;
 use tokio::net as tnet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "./sts.toml")]
+    pub config: std::path::PathBuf,
+    #[arg(long, default_value = "false")]
+    pub allow_insecure_transport: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     color_eyre::install()?;
-    let args = config::Args::parse();
+    let args = Args::parse();
 
-    let c = config::load_config(&args.config);
+    let c = config::load_config(&args.config)?;
+    if c.crypto.is_none() && !args.allow_insecure_transport {
+        panic!("Insecure transport in use without --allow-insecure-transport");
+    }
 
-    let addr: SocketAddr = format!("0.0.0.0:{}", &c.port).parse().unwrap();
-    info!("listening on {}", &addr);
-    let listener = tnet::TcpListener::bind(addr).await?;
+    info!("listening on {}", &c.addr);
+    let listener = tnet::TcpListener::bind(c.addr).await?;
 
     let token = CancellationToken::new();
     let mut transport = server::Server::new(c, token.clone(), listener).unwrap();

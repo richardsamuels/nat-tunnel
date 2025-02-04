@@ -6,9 +6,10 @@ use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug_span, error, info, trace};
+use tracing::{error, info, trace};
 
 pub struct Client<T> {
+    peer_addr: stnet::StreamId,
     config: config::Config,
     token: CancellationToken,
     transport: stnet::Transport<T>,
@@ -22,18 +23,17 @@ pub struct Client<T> {
 
 impl<T> Client<T>
 where
-    T: tokio::io::AsyncReadExt
-        + tokio::io::AsyncWriteExt
-        + std::marker::Unpin
-        + stnet::PeerAddr
-        + std::os::fd::AsRawFd,
+    T: stnet::Stream,
 {
-    pub fn new(config: config::Config, token: CancellationToken, stream: T) -> Client<T> {
-        stnet::set_keepalive(&stream, true)
-            .expect("keepalive should be enabled on stream, but operation failed");
-
+    pub fn new(
+        config: config::Config,
+        token: CancellationToken,
+        peer_addr: stnet::StreamId,
+        stream: T,
+    ) -> Client<T> {
         let (tx, rx) = mpsc::channel(16);
         Client {
+            peer_addr,
             config,
             token,
             transport: stnet::Transport::new(stream),
@@ -54,12 +54,7 @@ where
             return Err(stnet::Error::ConnectionRefused.into());
         };
 
-        let tunnels = self
-            .config
-            .tunnels
-            .iter()
-            .map(|tunnel| tunnel.remote_port)
-            .collect();
+        let tunnels = self.config.tunnels.keys().copied().collect();
         self.transport.write_frame(Frame::Tunnels(tunnels)).await?;
 
         let frame = self.transport.read_frame().await?;
@@ -70,10 +65,9 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(name = "Client", level = "debug", skip_all)]
     pub async fn run(&mut self) -> Result<()> {
-        let span = debug_span!("loop", addr = ?self.transport.peer_addr());
         self.push_tunnel_config().await?;
-        let _guard = span.enter();
         let ret = loop {
             tokio::select! {
                 // A tunnel has completed it's redirection
@@ -119,7 +113,7 @@ where
                             }
                         }
                         f => {
-                            trace!(frame = ?f, addr = ?self.transport.peer_addr(), "received unexpected frame");
+                            trace!(frame = ?f, addr = ?self.peer_addr, "received unexpected frame");
                         }
                     };
                 }
@@ -137,18 +131,17 @@ where
                 _ = self.token.cancelled() => {
                     self.handlers.abort_all();
                     self.transport.write_frame(Frame::Kthxbai).await?;
-                    self.transport.shutdown().await?;
                     break Ok(());
                 }
             }
         };
         self.handlers.shutdown().await;
-        self.transport.shutdown().await?;
+        while self.handlers.join_next().await.is_some() {}
         ret
     }
 
     async fn new_conn(&mut self, id: SocketAddr, port: u16) -> Result<()> {
-        let tunnel_cfg = match self.config.tunnel(port) {
+        let tunnel_cfg = match self.config.tunnels.get(&port) {
             None => {
                 unreachable!();
             }

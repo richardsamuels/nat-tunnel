@@ -1,19 +1,18 @@
-use crate::net as stnet;
+use crate::config::Result as CResult;
 use crate::Result;
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use std::fs::read_to_string;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pemfile::{certs, rsa_private_keys};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub psk: String,
-    pub port: u16,
+    pub addr: SocketAddr,
     #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
     pub crypto: Option<CryptoConfig>,
@@ -32,29 +31,48 @@ where
     Ok(value)
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-pub struct Args {
-    #[arg(short, long, default_value = "./sts.toml")]
-    pub config: PathBuf,
-}
+pub fn load_config(config: &Path) -> CResult<Config> {
+    let config_contents = read_to_string(config).with_context(|_| crate::config::IoSnafu {
+        message: format!("failed to read config file '{:?}'", config),
+    })?;
 
-pub fn load_config(config: &Path) -> Config {
-    let config_contents = match read_to_string(config) {
-        Ok(args) => args,
-        Err(e) => panic!("Failed to read config file '{:?}'. Error: {}", &config, e),
-    };
-
-    match toml::from_str(&config_contents) {
-        Ok(c) => c,
-        Err(e) => panic!("Failed to parse config file '{:?}'.\n{}", config, e),
-    }
+    toml::from_str(&config_contents).with_context(|_| crate::config::DecodeSnafu {})
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CryptoConfig {
+    #[serde(deserialize_with = "de_key_file")]
     pub key: PathBuf,
+    #[serde(deserialize_with = "de_cert_file")]
     pub cert: PathBuf,
+}
+
+fn de_key_file<'de, D>(deserializer: D) -> std::result::Result<PathBuf, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path: PathBuf = PathBuf::deserialize(deserializer)?;
+    if !path.exists() {
+        return Err(serde::de::Error::custom(format!(
+            "key file does not exist: {:?}",
+            path
+        )));
+    }
+    Ok(path)
+}
+
+fn de_cert_file<'de, D>(deserializer: D) -> std::result::Result<PathBuf, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path: PathBuf = PathBuf::deserialize(deserializer)?;
+    if !path.exists() {
+        return Err(serde::de::Error::custom(format!(
+            "cert file does not exist: {:?}",
+            path
+        )));
+    }
+    Ok(path)
 }
 
 #[derive(Debug)]
@@ -69,25 +87,16 @@ impl Crypto {
     }
 
     fn new<P: AsRef<Path>, Q: AsRef<Path> + std::fmt::Debug>(key: P, cert: Q) -> Result<Crypto> {
-        use std::fs::File;
-        use std::io::BufReader;
+        use rustls_pki_types::{pem::PemObject, CertificateDer};
 
-        let cert_fh = File::open(&cert).context(stnet::IoSnafu {
-            message: "failed to load key file",
-        })?;
-
-        let certs_: Vec<_> = certs(&mut BufReader::new(cert_fh))
+        let certs: Vec<_> = CertificateDer::pem_file_iter(&cert)
+            .with_context(|_| crate::config::CertificateSnafu {})?
             .filter_map(|x| x.ok())
             .collect();
 
-        let key_fh = File::open(&key).context(stnet::IoSnafu {
-            message: "failed to load key file",
-        })?;
-        let key = rsa_private_keys(&mut BufReader::new(key_fh))
-            .next()
-            .expect("invalid private key. (Convert your key with: openssl rsa -in your.key -out new.key -traditional)")
-            .map(Into::into)?;
+        let key = PrivateKeyDer::from_pem_file(&key)
+            .with_context(|_| crate::config::InvalidKeySnafu {})?;
 
-        Ok(Crypto { key, certs: certs_ })
+        Ok(Crypto { key, certs })
     }
 }
