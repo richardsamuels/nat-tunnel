@@ -25,18 +25,34 @@ async fn main() -> Result<()> {
         panic!("Insecure transport in use without --allow-insecure-transport");
     }
 
-    info!("listening on {}", &c.addr);
-    let listener = tnet::TcpListener::bind(c.addr).await?;
-
     let token = CancellationToken::new();
-    let mut transport = server::Server::new(c, token.clone(), listener).unwrap();
 
-    tokio::select! {
-        ret = transport.run() => return ret,
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received SIGINT. Terminating all connections and shutting down...");
-            transport.shutdown().await?;
+    // TODO wow lazy
+    match c.transport {
+        config::Transport::Tcp => {
+            info!("listening on {}", &c.addr);
+            let listener = tnet::TcpListener::bind(c.addr).await?;
+            let mut transport = server::Server::new(c, token.clone(), listener).unwrap();
+
+            tokio::select! {
+                ret = transport.run() => return ret,
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT. Terminating all connections and shutting down...");
+                    transport.shutdown().await?;
+                }
+            };
+        }
+        config::Transport::Quic => {
+            let mut transport = server::QuicServer::new(c, token.clone()).unwrap();
+            tokio::select! {
+                ret = transport.run() => return ret,
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT. Terminating all connections and shutting down...");
+                    transport.shutdown().await?;
+                }
+            };
         }
     };
+
     Ok(())
 }

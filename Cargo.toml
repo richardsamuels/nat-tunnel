@@ -17,7 +17,7 @@ path = "src/bin/sts.rs"
 clap = { version = "4.5.0", features = ["derive"] }
 serde = { version = "1.0.196", features = ["derive"] }
 toml = "0.8.9"
-tracing = "0.1.40"
+tracing = { version = "0.1.40", features = ["async-await"] }
 tracing-subscriber = "0.3.18"
 rmp-serde = "1.1.2"
 libc = "0.2.153"
@@ -35,6 +35,8 @@ serde_bytes = "0.11.14"
 rustls-pki-types = { version = "1.11.0", features = ["std"] }
 argon2 = "0.5.3"
 socket2 = { version = "0.5.8", features = ["all"] }
+quinn = { version = "0.11.6", features = ["rustls-ring"] }
+quinn-proto = { version = "0.11.9", features = ["rustls-ring"] }
 
 [dev-dependencies]
 httptest = "0.15.5"

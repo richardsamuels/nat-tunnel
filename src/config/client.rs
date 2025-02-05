@@ -12,6 +12,7 @@ pub struct Config {
     #[serde(deserialize_with = "de_psk")]
     pub psk: String,
     pub addr: String,
+    pub transport: crate::config::server::Transport,
     #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
     #[serde(deserialize_with = "de_tunnels")]
