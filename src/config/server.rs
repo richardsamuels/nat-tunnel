@@ -9,10 +9,11 @@ use std::vec::Vec;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
     Tcp,
+    #[default]
     Quic,
 }
 
@@ -20,6 +21,7 @@ pub enum Transport {
 pub struct Config {
     pub psk: String,
     pub addr: SocketAddr,
+    #[serde(default)]
     pub transport: Transport,
     #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
