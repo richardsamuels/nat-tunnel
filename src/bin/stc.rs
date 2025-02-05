@@ -9,13 +9,25 @@ use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "./stc.toml")]
+    pub config: std::path::PathBuf,
+    #[arg(long, default_value = "false")]
+    pub allow_insecure_transport: bool,
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
     color_eyre::install().unwrap();
-    let args = config::Args::parse();
+    let args = Args::parse();
 
-    let c = config::load_config(&args.config);
+    let c = config::load_config(&args.config).expect("invalid config");
+    if c.crypto.is_none() && !args.allow_insecure_transport {
+        panic!("Insecure transport in use without --allow-insecure-transport");
+    }
     let crypto_cfg = c
         .crypto
         .as_ref()
@@ -67,15 +79,23 @@ async fn run(
     token: CancellationToken,
     crypto_cfg: &Option<Arc<rustls::ClientConfig>>,
 ) -> Result<()> {
-    let addr = format!("{}:{}", &c.addr, &c.port);
-    info!("Handshaking with {}", &addr);
-    let client_stream = match tnet::TcpStream::connect(&addr).await {
+    info!("Handshaking with {}", &c.addr);
+    let client_stream = match tnet::TcpStream::connect(&c.addr).await {
         Err(e) => {
-            error!(cause = ?e, addr = addr, "failed to connect to Server");
+            error!(cause = ?e, addr = ?c.addr, "failed to connect to Server");
             return Err(e.into());
         }
         Ok(s) => s,
     };
+    let client_stream = client_stream
+        .into_std()
+        .expect("failed to get std TcpStream");
+    simple_tunnel::net::set_keepalive(&client_stream)
+        .expect("keepalive should be enabled on stream, but operation failed");
+    let client_stream = tnet::TcpStream::from_std(client_stream)?;
+
+    let peer_addr = client_stream.peer_addr().expect("ip");
+
     client_stream
         .set_nodelay(true)
         .expect("Could not set TCP_NODELAY on socket");
@@ -93,10 +113,10 @@ async fn run(
             .expect("TLS initialization failed");
 
         info!("TLS enabled. All connections to the Server will be encrypted.");
-        let mut client = client::Client::new(c, token.clone(), client_stream);
+        let mut client = client::Client::new(c, token.clone(), peer_addr, client_stream);
         client.run().await
     } else {
-        let mut client = client::Client::new(c, token.clone(), client_stream);
+        let mut client = client::Client::new(c, token.clone(), peer_addr, client_stream);
         client.run().await
     }
 }

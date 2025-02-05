@@ -40,8 +40,7 @@ async fn setup(addr: &SocketAddr, skip_tls: bool) -> (PathBuf, PathBuf) {
     let mut stc_cfg = format!(
         "
 psk = \"abcd\"
-addr = \"127.0.0.1\"
-port = 12000
+addr = \"127.0.0.1:12000\"
 
 [[tunnels]]
 remote_port = 10000
@@ -61,7 +60,7 @@ ca = \"tests/ca.pem\"
 
     let mut sts_cfg = "
 psk = \"abcd\"
-port = 12000
+addr = \"127.0.0.1:12000\"
 "
     .to_string();
 
@@ -129,14 +128,26 @@ async fn integration() {
     let (sts_path, stc_path) = setup(&addr, false).await;
 
     let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+    let mut sts_h = ChildGuard(
+        sts.arg("-c")
+            .arg(&sts_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     // wait until we can connect to the server
     let addr = "127.0.0.1:12000".parse().unwrap();
     wait_for_server(&addr).await;
 
     let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
+    let mut stc_h = ChildGuard(
+        stc.arg("-c")
+            .arg(&stc_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     let url = server.url("/");
     let resp = reqwest::get(url.to_string()).await.unwrap();
@@ -167,14 +178,26 @@ async fn integration_no_tls() {
     let (sts_path, stc_path) = setup(&addr, true).await;
 
     let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+    let mut sts_h = ChildGuard(
+        sts.arg("-c")
+            .arg(&sts_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     // wait until we can connect to the server
     let addr = "127.0.0.1:12000".parse().unwrap();
     wait_for_server(&addr).await;
 
     let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
+    let mut stc_h = ChildGuard(
+        stc.arg("-c")
+            .arg(&stc_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     let url = server.url("/");
     let resp = reqwest::get(url.to_string()).await.unwrap();
@@ -201,13 +224,25 @@ async fn integration_client_failure() {
     let (sts_path, stc_path) = setup(&addr, false).await;
 
     let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+    let mut sts_h = ChildGuard(
+        sts.arg("-c")
+            .arg(&sts_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     let addr = "127.0.0.1:12000".parse().unwrap();
     wait_for_server(&addr).await;
 
     let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
+    let mut stc_h = ChildGuard(
+        stc.arg("-c")
+            .arg(&stc_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     stc_h.kill().unwrap();
     let _ = stc_h.wait().unwrap();
@@ -226,13 +261,25 @@ async fn integration_server_failure() {
     let (sts_path, stc_path) = setup(&addr, false).await;
 
     let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(sts.arg("-c").arg(&sts_path).spawn().unwrap());
+    let mut sts_h = ChildGuard(
+        sts.arg("-c")
+            .arg(&sts_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     let addr = "127.0.0.1:12000".parse().unwrap();
     wait_for_server(&addr).await;
 
     let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(stc.arg("-c").arg(&stc_path).spawn().unwrap());
+    let mut stc_h = ChildGuard(
+        stc.arg("-c")
+            .arg(&stc_path)
+            .arg("--allow-insecure-transport")
+            .spawn()
+            .unwrap(),
+    );
 
     sts_h.kill().unwrap();
     let _ = stc_h.wait();
