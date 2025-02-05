@@ -2,7 +2,7 @@ use httptest::{matchers::*, responders::*, Expectation, Server};
 use std::fs::File;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
@@ -36,11 +36,13 @@ impl std::ops::DerefMut for ChildGuard {
     }
 }
 
-async fn setup(addr: &SocketAddr, skip_tls: bool) -> (PathBuf, PathBuf) {
+async fn setup(addr: &SocketAddr, transport: &str, skip_tls: bool) -> (PathBuf, PathBuf) {
     let mut stc_cfg = format!(
         "
 psk = \"abcd\"
 addr = \"127.0.0.1:12000\"
+transport = \"{transport}\"
+
 
 [[tunnels]]
 remote_port = 10000
@@ -58,11 +60,13 @@ ca = \"tests/ca.pem\"
         );
     }
 
-    let mut sts_cfg = "
+    let mut sts_cfg = format!(
+        "
 psk = \"abcd\"
 addr = \"127.0.0.1:12000\"
+transport = \"{transport}\"
 "
-    .to_string();
+    );
 
     if !skip_tls {
         sts_cfg.push_str(
@@ -95,6 +99,11 @@ cert = \"tests/server.crt.pem\"
 
 static MTX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+async fn wait_for_server_udp(addr: &SocketAddr) {
+    // TODO
+    sleep(Duration::from_millis(500)).await;
+}
+
 async fn wait_for_server(addr: &SocketAddr) {
     let mut tries = 5;
     loop {
@@ -114,6 +123,48 @@ async fn wait_for_server(addr: &SocketAddr) {
     }
 }
 
+async fn start_(
+    addr: &SocketAddr,
+    protocol: &str,
+    allow_insecure: bool,
+) -> (ChildGuard, ChildGuard) {
+    let (sts_path, stc_path) = setup(addr, protocol, allow_insecure).await;
+
+    let mut sts = test_bin::get_test_bin("sts");
+    let sts_b = sts
+        .arg("-c")
+        .arg(sts_path)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+
+    if allow_insecure {
+        sts_b.arg("--allow-insecure-transport");
+    }
+
+    let sts_h = ChildGuard(sts_b.spawn().unwrap());
+
+    // wait until we can connect to the server
+    let addr = "127.0.0.1:12000".parse().unwrap();
+    if protocol == "quic" {
+        wait_for_server_udp(&addr).await;
+    } else {
+        wait_for_server(&addr).await;
+    }
+
+    let mut stc = test_bin::get_test_bin("stc");
+    let stc_b = stc
+        .arg("-c")
+        .arg(stc_path)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    if allow_insecure {
+        stc_b.arg("--allow-insecure-transport");
+    }
+    let stc_h = ChildGuard(stc_b.spawn().unwrap());
+
+    (sts_h, stc_h)
+}
+
 // XXX Hey, if it's 2026 or later and these tests are failing, it's because the
 // certificate in the tests folder has expired
 #[tokio::test]
@@ -125,29 +176,36 @@ async fn integration() {
     );
 
     let addr = server.addr();
-    let (sts_path, stc_path) = setup(&addr, false).await;
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false).await;
 
-    let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(
-        sts.arg("-c")
-            .arg(&sts_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
+    let url = server.url("/");
+    let resp = reqwest::get(url.to_string()).await.unwrap();
+
+    // assert the response has a 200 status code.
+    assert!(resp.status().is_success());
+
+    match sts_h.try_wait() {
+        Ok(None) => (),
+        _ => panic!("sts dead"),
+    };
+
+    match stc_h.try_wait() {
+        Ok(None) => (),
+        _ => panic!("stc dead"),
+    };
+}
+
+#[tokio::test]
+async fn integration_quic() {
+    let _guard = MTX.lock();
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
     );
 
-    // wait until we can connect to the server
-    let addr = "127.0.0.1:12000".parse().unwrap();
-    wait_for_server(&addr).await;
+    let addr = server.addr();
 
-    let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(
-        stc.arg("-c")
-            .arg(&stc_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
-    );
+    let (mut sts_h, mut stc_h) = start_(&addr, "quic", false).await;
 
     let url = server.url("/");
     let resp = reqwest::get(url.to_string()).await.unwrap();
@@ -175,34 +233,11 @@ async fn integration_no_tls() {
     );
 
     let addr = server.addr();
-    let (sts_path, stc_path) = setup(&addr, true).await;
-
-    let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(
-        sts.arg("-c")
-            .arg(&sts_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
-    );
-
-    // wait until we can connect to the server
-    let addr = "127.0.0.1:12000".parse().unwrap();
-    wait_for_server(&addr).await;
-
-    let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(
-        stc.arg("-c")
-            .arg(&stc_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
-    );
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", true).await;
 
     let url = server.url("/");
     let resp = reqwest::get(url.to_string()).await.unwrap();
 
-    // assert the response has a 200 status code.
     assert!(resp.status().is_success());
 
     match sts_h.try_wait() {
@@ -221,28 +256,8 @@ async fn integration_client_failure() {
     let _guard = MTX.lock();
     // Client failure MUST NOT crash server
     let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
-    let (sts_path, stc_path) = setup(&addr, false).await;
 
-    let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(
-        sts.arg("-c")
-            .arg(&sts_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
-    );
-
-    let addr = "127.0.0.1:12000".parse().unwrap();
-    wait_for_server(&addr).await;
-
-    let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(
-        stc.arg("-c")
-            .arg(&stc_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
-    );
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false).await;
 
     stc_h.kill().unwrap();
     let _ = stc_h.wait().unwrap();
@@ -258,28 +273,8 @@ async fn integration_server_failure() {
     let _guard = MTX.lock();
     // Server failure MUST trigger client shutdown
     let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
-    let (sts_path, stc_path) = setup(&addr, false).await;
 
-    let mut sts = test_bin::get_test_bin("sts");
-    let mut sts_h = ChildGuard(
-        sts.arg("-c")
-            .arg(&sts_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
-    );
-
-    let addr = "127.0.0.1:12000".parse().unwrap();
-    wait_for_server(&addr).await;
-
-    let mut stc = test_bin::get_test_bin("stc");
-    let mut stc_h = ChildGuard(
-        stc.arg("-c")
-            .arg(&stc_path)
-            .arg("--allow-insecure-transport")
-            .spawn()
-            .unwrap(),
-    );
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false).await;
 
     sts_h.kill().unwrap();
     let _ = stc_h.wait();

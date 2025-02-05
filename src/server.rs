@@ -1,8 +1,12 @@
 use crate::{config::server as config, net as stnet, redirector::Redirector, Result};
 use snafu::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::marker::Unpin;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use tokio::io::ReadBuf;
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -32,6 +36,197 @@ impl std::convert::From<stnet::Error> for ClientValidationError {
 }
 
 type ClientResult<T> = std::result::Result<T, ClientValidationError>;
+
+pub struct QuicServer {
+    config: Arc<config::Config>,
+    token: CancellationToken,
+    active_tunnels: Arc<Mutex<ActiveTunnels>>,
+    server: quinn::Endpoint,
+    handlers: JoinSet<()>,
+}
+
+impl QuicServer {
+    pub fn new(config: config::Config, token: CancellationToken) -> Result<Self> {
+        let tls_config = match config.crypto {
+            None => panic!("missing cfg"),
+            Some(ref crypto_paths) => {
+                let crypto = config::Crypto::from_crypto_cfg(crypto_paths)?;
+
+                quinn::ServerConfig::with_single_cert(crypto.certs, crypto.key)?
+            }
+        };
+        let endpoint = quinn::Endpoint::server(tls_config, config.addr)?;
+
+        Ok(QuicServer {
+            server: endpoint,
+            config: config.into(),
+            token,
+            active_tunnels: Arc::new(ActiveTunnels::new().into()),
+            handlers: JoinSet::new(),
+        })
+    }
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.token.cancel();
+        while self.handlers.join_next().await.is_some() {
+            // intentionally blank
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "QuicSupervisor", level = "info", skip_all)]
+    pub async fn run(&mut self) -> Result<()> {
+        info!("TLS enabled. All connections to Clients will be encrypted.");
+        loop {
+            let incoming = tokio::select! {
+                maybe_accept = self.server.accept() => {
+                    match maybe_accept {
+                        None => {
+                            info!("Failed to accept new client");
+                            break
+                        }
+                        Some(s) => s,
+                    }
+                }
+
+                _ = self.token.cancelled() => {
+                    return Ok(())
+                }
+            };
+            let id = incoming.orig_dst_cid();
+            let conn = incoming.await?;
+
+            let mut h = QuicStream::new(
+                self.config.clone(),
+                self.token.clone(),
+                self.active_tunnels.clone(),
+                id,
+                conn,
+            )?;
+            self.handlers.spawn(async move {
+                trace!(addr = ?id, "client handler start");
+                if let Err(e) = h.run().await {
+                    error!(cause = ?e, addr = ?id, "client connection dropped");
+                }
+                trace!(addr = ?id, "client handler end");
+            });
+        }
+        self.shutdown().await?;
+        Ok(())
+    }
+}
+
+pub struct QuicBox {
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+}
+
+impl QuicBox {
+    pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
+        QuicBox { send, recv }
+    }
+
+    pub fn id(&self) -> (quinn::StreamId, quinn::StreamId) {
+        (self.send.id(), self.recv.id())
+    }
+}
+impl Unpin for QuicBox {}
+
+impl tokio::io::AsyncWrite for QuicBox {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().send)
+            .poll_write(cx, buf)
+            .map_err(Into::into)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<tokio::io::Result<()>> {
+        Pin::new(&mut self.get_mut().send).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<tokio::io::Result<()>> {
+        Pin::new(&mut self.get_mut().send).poll_shutdown(cx)
+    }
+}
+
+impl tokio::io::AsyncRead for QuicBox {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.recv).poll_read(cx, buf)
+    }
+}
+
+pub struct QuicStream {
+    config: Arc<config::Config>,
+    token: CancellationToken,
+    active_tunnels: Arc<Mutex<ActiveTunnels>>,
+    id: quinn::ConnectionId,
+    conn: quinn::Connection,
+
+    handlers: JoinSet<()>,
+}
+impl QuicStream {
+    pub fn new(
+        config: Arc<config::Config>,
+        token: CancellationToken,
+        active_tunnels: Arc<Mutex<ActiveTunnels>>,
+        id: quinn::ConnectionId,
+        conn: quinn::Connection,
+    ) -> Result<Self> {
+        Ok(QuicStream {
+            config,
+            token,
+            active_tunnels,
+            handlers: JoinSet::new(),
+            id,
+            conn,
+        })
+    }
+    #[tracing::instrument(name = "QuicSupervisor", level = "info", skip_all)]
+    pub async fn run(&mut self) -> Result<()> {
+        loop {
+            tokio::select! {
+                    _ = self.token.cancelled() => {
+                        return Ok(());
+                    }
+
+                    stream = self.conn.accept_bi() => {
+                    let stream = match stream {
+                        Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            return Err(e.into());
+                        }
+                        Ok(s) => s,
+                    };
+                        let id = crate::net::transport::StreamId::Quic(self.id, stream.0.id(), stream.1.id());
+                        let b = QuicBox{send: stream.0, recv: stream.1};
+                        let mut h = ClientHandler::new(
+                            self.config.clone(),
+                            self.token.clone(),
+                            self.active_tunnels.clone(),
+                            (id.clone(), Box::new(b)),
+                        );
+                        self.handlers.spawn(async move {
+                            trace!(addr = ?id, "client handler start");
+                            if let Err(e) = h.run().await {
+                                error!(cause = ?e, addr = ?id, "client connection dropped");
+                            }
+                            trace!(addr = ?id, "client handler end");
+                        });
+
+                    }
+
+            }
+        }
+    }
+}
 
 pub struct Server {
     config: Arc<config::Config>,
@@ -119,7 +314,7 @@ impl Server {
                     self.config.clone(),
                     self.token.clone(),
                     self.active_tunnels.clone(),
-                    (peer_addr, socket),
+                    (peer_addr.into(), socket),
                 );
                 self.handlers.spawn(async move {
                     trace!(addr = ?addr, "client handler start");
@@ -134,7 +329,7 @@ impl Server {
                     self.config.clone(),
                     self.token.clone(),
                     self.active_tunnels.clone(),
-                    (peer_addr, Box::new(socket)),
+                    (peer_addr.into(), Box::new(socket)),
                 );
                 self.handlers.spawn(async move {
                     trace!(addr = ?addr, "client handler start");

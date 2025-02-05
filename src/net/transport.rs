@@ -29,7 +29,17 @@ where
 
 pub trait Stream: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Sync + Send + Unpin {}
 impl<T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Sync + Send + Unpin> Stream for T {}
-pub type StreamId = SocketAddr;
+#[derive(Debug, Hash, Clone)]
+pub enum StreamId {
+    Basic(SocketAddr),
+    Quic(quinn::ConnectionId, quinn::StreamId, quinn::StreamId),
+}
+
+impl From<SocketAddr> for StreamId {
+    fn from(id: SocketAddr) -> Self {
+        StreamId::Basic(id)
+    }
+}
 #[allow(type_alias_bounds)]
 pub type AcceptedStream<T: Stream> = (StreamId, T);
 
