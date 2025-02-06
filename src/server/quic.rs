@@ -1,5 +1,5 @@
-use crate::server::common::*;
-use crate::{config::server as config, Result};
+use super::common::*;
+use crate::{config::server as config, net as stnet, Result};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,7 @@ pub struct QuicServer {
 impl QuicServer {
     pub fn new(config: config::Config, token: CancellationToken) -> Result<Self> {
         let tls_config = match config.crypto {
-            None => panic!("missing cfg"),
+            None => panic!("programmer error: missing cfg"),
             Some(ref crypto_paths) => {
                 let crypto = config::Crypto::from_crypto_cfg(crypto_paths)?;
 
@@ -109,7 +109,7 @@ impl QuicStream {
             conn,
         }
     }
-    #[tracing::instrument(name = "QuicSupervisor", level = "info", skip_all)]
+    #[tracing::instrument(name = "QuicSupervisor", level = "info", skip_all, fields(bind=self.config.addr.to_string()))]
     pub async fn run(&mut self) -> Result<()> {
         loop {
             tokio::select! {
@@ -127,11 +127,11 @@ impl QuicStream {
                         }
                         Ok(s) => s,
                     };
-                        let id = crate::net::transport::StreamId::Quic(self.id, stream.0.id(), stream.1.id());
+                        let id = stnet::transport::StreamId::Quic(self.id, stream.0.id(), stream.1.id());
                         let b = QuicBox::new(stream.0, stream.1);
-                        let mut h = crate::server::ClientHandler::new(
+                        let mut h = super::ClientHandler::new(
                             self.config.clone(),
-                            self.token.clone(),
+                            self.token.child_token(),
                             self.active_tunnels.clone(),
                             (id.clone(), Box::new(b)),
                         );

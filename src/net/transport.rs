@@ -6,7 +6,6 @@ use snafu::ResultExt;
 use std::marker::Unpin;
 use std::net::SocketAddr;
 use tokio_util::codec;
-use tracing::error;
 
 pub type FramedLength<T> = tokio_util::codec::Framed<T, codec::LengthDelimitedCodec>;
 pub type Framed<T> = tokio_serde::Framed<
@@ -64,12 +63,33 @@ where
     pub async fn read_helo(&mut self) -> Result<Vec<u8>> {
         let stream = self.framed.get_mut().get_mut();
         let mut magic = [0x00; 4];
-        stream
-            .read(&mut magic)
-            .await
-            .with_context(|_| crate::net::IoSnafu {
-                message: "failed to read protocol header",
-            })?;
+
+        let maybe_read = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            stream.read_exact(&mut magic),
+        )
+        .await;
+
+        match maybe_read {
+            Err(_) => {
+                return Err(crate::net::IoTimeoutSnafu {
+                    context: "helo read",
+                }
+                .build());
+            }
+            Ok(Err(e)) if reconnectable_err(&e) => {
+                return Err(Error::ConnectionDead);
+            }
+            Ok(Err(e)) => {
+                return Err(stnet::Error::Io {
+                    message: "failed to read helo".to_string(),
+                    source: e,
+                    backtrace: snafu::Backtrace::capture(),
+                })
+            }
+            Ok(Ok(_)) => (),
+        };
+
         if magic[0] != 0xFA {
             return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
         }
@@ -79,6 +99,7 @@ where
 
         let size = u16::from_be_bytes([magic[2], magic[3]]);
         if size >= 512 {
+            tracing::error!("server sent key with invalid length {size}");
             return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
         }
 
@@ -92,11 +113,10 @@ where
 
         match maybe_read {
             Err(_) => {
-                error!("read timeout");
-                return Err(stnet::Error::Other {
-                    message: "read timeout".to_string(),
-                    backtrace: snafu::Backtrace::capture(),
-                });
+                return Err(crate::net::IoTimeoutSnafu {
+                    context: "helo read",
+                }
+                .build());
             }
             Ok(Err(e)) if reconnectable_err(&e) => {
                 return Err(Error::ConnectionDead);
@@ -117,12 +137,6 @@ where
         // Magic byte + protocol version num
         let mut magic = vec![0xFA, 0x00];
         let l = key.len();
-        if l >= 512 {
-            return Err(crate::net::transport::OtherSnafu {
-                message: "bad key length",
-            }
-            .build());
-        }
         magic.extend(&(l as u16).to_be_bytes());
         magic.extend_from_slice(key);
         self.framed
@@ -164,11 +178,10 @@ where
 
         match future {
             Err(_) => {
-                error!("write timeout");
-                return Err(stnet::Error::Other {
-                    message: "write timeout".to_string(),
-                    backtrace: snafu::Backtrace::capture(),
-                });
+                return Err(crate::net::IoTimeoutSnafu {
+                    context: "frame write",
+                }
+                .build());
             }
             Ok(Err(e)) if reconnectable_err(&e) => {
                 return Err(Error::ConnectionDead);

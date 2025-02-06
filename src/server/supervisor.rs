@@ -1,5 +1,5 @@
-use crate::server::common::*;
-use crate::{config::server as config, net as stnet, redirector::Redirector, Result};
+use super::common::*;
+use crate::{config::server as config, net as stnet, Result};
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -199,7 +199,7 @@ where
 
         {
             use argon2::{
-                password_hash::{PasswordHasher, PasswordVerifier, SaltString},
+                password_hash::{rand_core::OsRng, PasswordHasher, PasswordVerifier, SaltString},
                 Argon2,
             };
             let argon2 = Argon2::default();
@@ -212,9 +212,9 @@ where
             //
             // TODO We should probably support encoding the PSK on disk as
             // a PHC string with randomly generated salt.
-            let lolsalt = SaltString::from_b64("dontcaredontcaredontcare").unwrap();
+            let salt = SaltString::generate(&mut OsRng);
             let our_hash = argon2
-                .hash_password(self.config.psk.as_bytes(), &lolsalt)
+                .hash_password(self.config.psk.as_bytes(), &salt)
                 .map_err(|_| ClientValidationError::IncorrectPSK)?;
             if argon2.verify_password(&key, &our_hash).is_err() {
                 return Err(ClientValidationError::IncorrectPSK);
@@ -267,7 +267,7 @@ where
             let token = self.token.clone();
             let h = tokio::spawn(async move {
                 trace!(port = ?port, "external listener start");
-                let mut h = ExternalListener::new(port, mtu, token, to_tunnels, to_client);
+                let mut h = super::TunnelSupervisor::new(port, mtu, token, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
@@ -399,86 +399,5 @@ where
             tunnels.clear();
         }
         ret
-    }
-}
-
-struct ExternalListener {
-    remote_port: u16,
-    mtu: u16,
-    token: CancellationToken,
-    to_client: mpsc::Sender<stnet::RedirectorFrame>,
-    tunnels: Arc<Mutex<TunnelChannels>>,
-}
-
-impl ExternalListener {
-    fn new(
-        remote_port: u16,
-        mtu: u16,
-        token: CancellationToken,
-        tunnels: Arc<Mutex<TunnelChannels>>,
-        to_client: mpsc::Sender<stnet::RedirectorFrame>,
-    ) -> Self {
-        ExternalListener {
-            remote_port,
-            mtu,
-            token,
-            tunnels,
-            to_client,
-        }
-    }
-
-    #[tracing::instrument(name = "External", level = "info", skip_all)]
-    async fn run(&mut self) -> Result<()> {
-        // TODO support more protocols, including TCP+TLS/QUIC
-        let external_listener =
-            tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
-        loop {
-            let (external_stream, external_addr) = tokio::select! {
-                maybe_accept = external_listener.accept() => match maybe_accept{
-                    Err(e) => {
-                        error!(cause = ?e, "failed to accept client");
-                        continue
-                    }
-                    Ok(s) => s,
-                },
-
-                _ = self.token.cancelled() => break Ok(()),
-            };
-
-            info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
-            self.to_client
-                .send(stnet::RedirectorFrame::StartListener(
-                    external_addr,
-                    self.remote_port,
-                ))
-                .await?;
-
-            let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
-            {
-                let mut tunnels = self.tunnels.lock().unwrap();
-                tunnels.insert(external_addr, to_tunnel);
-            }
-
-            let port = self.remote_port;
-            let mtu = self.mtu;
-            let to_client = self.to_client.clone();
-            let tunnels = self.tunnels.clone();
-            let token = self.token.clone();
-            tokio::spawn(async move {
-                let mut r = Redirector::with_stream(
-                    external_addr,
-                    port,
-                    mtu,
-                    token,
-                    external_stream,
-                    to_client,
-                    from_client,
-                );
-                r.run().await;
-                let mut tunnels = tunnels.lock().unwrap();
-                tunnels.remove(&external_addr);
-                trace!(addr = ?external_addr, "Tunnel done");
-            });
-        }
     }
 }

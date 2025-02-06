@@ -15,6 +15,11 @@ pub enum Error {
         source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
+    #[snafu(display("{context} timed out"))]
+    IoTimeout {
+        context: String,
+        backtrace: snafu::Backtrace,
+    },
     #[snafu(display("msgpack decode error"))]
     MsgPackDecode {
         source: rmp_serde::decode::Error,
