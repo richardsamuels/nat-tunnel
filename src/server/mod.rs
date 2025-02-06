@@ -1,9 +1,11 @@
 mod common;
 mod quic;
-mod supervisor;
+mod tcp;
+mod clientstream;
 mod tunnel;
 
 pub use common::*;
 pub use quic::*;
-pub use supervisor::*;
+pub use clientstream::*;
+pub use tcp::*;
 pub use tunnel::*;

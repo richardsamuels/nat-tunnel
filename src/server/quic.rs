@@ -33,7 +33,7 @@ impl QuicServer {
             handlers: JoinSet::new(),
         })
     }
-    async fn shutdown(&mut self) -> Result<()> {
+    pub async fn shutdown(&mut self) -> Result<()> {
         self.token.cancel();
         while self.handlers.join_next().await.is_some() {
             // intentionally blank
