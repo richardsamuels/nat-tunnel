@@ -1,4 +1,4 @@
-use simple_tunnel::net::frame::Datagram;
+use simple_tunnel::net::Datagram;
 use simple_tunnel::redirector::PROTOCOL_OVERHEAD;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 

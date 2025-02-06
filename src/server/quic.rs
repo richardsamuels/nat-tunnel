@@ -127,7 +127,7 @@ impl QuicStream {
                         }
                         Ok(s) => s,
                     };
-                        let id = stnet::transport::StreamId::Quic(self.id, stream.0.id(), stream.1.id());
+                        let id = stnet::StreamId::Quic(self.id, stream.0.id(), stream.1.id());
                         let b = QuicBox::new(stream.0, stream.1);
                         let mut h = super::ClientHandler::new(
                             self.config.clone(),

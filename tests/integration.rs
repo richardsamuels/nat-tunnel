@@ -2,7 +2,7 @@ use httptest::{matchers::*, responders::*, Expectation, Server};
 use std::fs::File;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::process::Child;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
@@ -101,7 +101,22 @@ static MTX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 async fn wait_for_server_udp(addr: &SocketAddr) {
     // TODO
-    sleep(Duration::from_millis(500)).await;
+    let mut tries = 5;
+    loop {
+        if tries == 0 {
+            panic!(
+                "Tried to connect, but failed. Did the server ever come up? {:?}",
+                addr
+            );
+        }
+        let udp_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        if udp_socket.connect(addr).await.is_err() {
+            sleep(Duration::from_millis(100)).await;
+        } else {
+            break;
+        }
+        tries -= 1
+    }
 }
 
 async fn wait_for_server(addr: &SocketAddr) {

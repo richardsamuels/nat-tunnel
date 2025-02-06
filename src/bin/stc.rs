@@ -1,4 +1,5 @@
 use clap::Parser;
+use color_eyre::eyre::Report;
 use simple_tunnel::net::Error;
 use simple_tunnel::Result;
 use simple_tunnel::{client, config::client as config, net as stnet};
@@ -113,11 +114,16 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     endpoint.set_default_client_config(client_config);
 
     let addrs = c.addr.to_socket_addrs()?.next().expect("resolved addr");
+    info!("Resolved addrs: {addrs}");
+    let expected_host = why_do_i_have_to_impl_this(&c.addr);
 
-    let conn = endpoint
-        .connect(addrs, why_do_i_have_to_impl_this(&c.addr))?
-        .await
-        .expect("failed to connect");
+    let conn = tokio::select! {
+        maybe_endpoint = endpoint.connect(addrs, expected_host)? => maybe_endpoint.expect("Connection failed"),
+
+        _ = token.cancelled() => {
+            return Ok(())
+        }
+    };
     let (send, recv) = conn.open_bi().await.expect("failed to open stream");
 
     let id = stnet::StreamId::Quic(
@@ -137,12 +143,21 @@ async fn run(
     crypto_cfg: &Option<Arc<rustls::ClientConfig>>,
 ) -> Result<()> {
     info!("Handshaking with {}", &c.addr);
-    let client_stream = match tnet::TcpStream::connect(&c.addr).await {
-        Err(e) => {
-            error!(cause = ?e, addr = ?c.addr, "failed to connect to Server");
-            return Err(e.into());
+    let client_stream = tokio::select! {
+        result = tnet::TcpStream::connect(&c.addr) => {
+            match result {
+                Err(e) => {
+                    error!(cause = ?e, addr = ?c.addr, "failed to connect to Server");
+                    return Err(e.into());
+                }
+                Ok(s) => s,
+            }
         }
-        Ok(s) => s,
+        _ = token.cancelled() => {
+            return Err(Report::from(simple_tunnel::net::IoTimeoutSnafu {
+                context: "connection attempt cancelled",
+            }.build()));
+        }
     };
     let client_stream = client_stream
         .into_std()
