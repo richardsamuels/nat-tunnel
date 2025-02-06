@@ -61,7 +61,13 @@ impl QuicServer {
                 }
             };
             let id = incoming.orig_dst_cid();
-            let conn = incoming.await?;
+            let conn = match incoming.await {
+                Err(e) => {
+                    error!(e = ?e, "Connect failed");
+                    continue
+                }
+                Ok(conn) => conn,
+            };
 
             let mut h = QuicStream::new(
                 self.config.clone(),

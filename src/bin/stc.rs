@@ -111,6 +111,7 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     let qcc = QuicClientConfig::try_from(crypto_cfg)?;
     let client_config = quinn::ClientConfig::new(Arc::new(qcc));
     let mut endpoint = quinn::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into())?;
+    //let mut endpoint = quinn::Endpoint::client((std::net::Ipv4Addr::UNSPECIFIED, 0).into())?;
     endpoint.set_default_client_config(client_config);
 
     let addrs = c.addr.to_socket_addrs()?.next().expect("resolved addr");
@@ -118,7 +119,7 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     let expected_host = why_do_i_have_to_impl_this(&c.addr);
 
     let conn = tokio::select! {
-        maybe_endpoint = endpoint.connect(addrs, expected_host)? => maybe_endpoint.expect("Connection failed"),
+        maybe_endpoint = endpoint.connect("173.255.237.84:12345".parse().unwrap(), expected_host)? => maybe_endpoint.expect("Connection failed"),
 
         _ = token.cancelled() => {
             return Ok(())
