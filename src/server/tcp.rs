@@ -1,5 +1,5 @@
 use super::common::*;
-use crate::{config::server as config,  Result};
+use crate::{config::server as config, Result};
 use std::sync::{Arc, Mutex};
 use tokio::net as tnet;
 use tokio::task::JoinSet;

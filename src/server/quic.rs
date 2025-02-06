@@ -64,7 +64,7 @@ impl QuicServer {
             let conn = match incoming.await {
                 Err(e) => {
                     error!(e = ?e, "Connect failed");
-                    continue
+                    continue;
                 }
                 Ok(conn) => conn,
             };

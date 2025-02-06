@@ -1,9 +1,9 @@
 use super::common::*;
-use snafu::prelude::*;
 use crate::{config::server as config, net as stnet, Result};
+use snafu::prelude::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
@@ -27,7 +27,6 @@ impl std::convert::From<stnet::Error> for ClientValidationError {
 }
 
 type ClientResult<T> = std::result::Result<T, ClientValidationError>;
-
 
 pub struct ClientHandler<T>
 where

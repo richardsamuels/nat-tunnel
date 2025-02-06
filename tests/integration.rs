@@ -2,7 +2,7 @@ use httptest::{matchers::*, responders::*, Expectation, Server};
 use std::fs::File;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::process::Child;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
