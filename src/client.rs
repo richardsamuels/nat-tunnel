@@ -45,9 +45,7 @@ where
     }
 
     async fn push_tunnel_config(&mut self) -> Result<()> {
-        self.transport
-            .write_frame(Frame::Auth(self.config.psk.clone().into()))
-            .await?;
+        self.transport.send_helo(self.config.psk.as_bytes()).await?;
 
         let frame = self.transport.read_frame().await?;
         let stnet::Frame::Auth(_) = frame else {

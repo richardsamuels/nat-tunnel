@@ -60,6 +60,9 @@ where
 pub struct CryptoConfig {
     #[serde(default = "localhost_ipv4", deserialize_with = "de_sni_name")]
     pub sni_name: String,
+
+    // Note: we defer parsing the certificate file because keys/certs can't
+    // /shouldn't be moved around in memory
     #[serde(deserialize_with = "de_ca_file")]
     pub ca: Option<PathBuf>,
 }

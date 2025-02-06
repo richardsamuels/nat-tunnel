@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         config::Transport::Tcp => {
             info!("listening on {}", &c.addr);
             let listener = tnet::TcpListener::bind(c.addr).await?;
-            let mut transport = server::Server::new(c, token.clone(), listener).unwrap();
+            let mut transport = server::TcpServer::new(c, token.clone(), listener).unwrap();
 
             tokio::select! {
                 ret = transport.run() => return ret,

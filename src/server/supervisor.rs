@@ -1,21 +1,15 @@
+use crate::server::common::*;
 use crate::{config::server as config, net as stnet, redirector::Redirector, Result};
 use snafu::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::marker::Unpin;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-use tokio::io::ReadBuf;
 use tokio::net as tnet;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
-
-type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
-type ActiveTunnels = HashSet<u16>;
 
 #[derive(Snafu, Debug)]
 enum ClientValidationError {
@@ -37,198 +31,7 @@ impl std::convert::From<stnet::Error> for ClientValidationError {
 
 type ClientResult<T> = std::result::Result<T, ClientValidationError>;
 
-pub struct QuicServer {
-    config: Arc<config::Config>,
-    token: CancellationToken,
-    active_tunnels: Arc<Mutex<ActiveTunnels>>,
-    server: quinn::Endpoint,
-    handlers: JoinSet<()>,
-}
-
-impl QuicServer {
-    pub fn new(config: config::Config, token: CancellationToken) -> Result<Self> {
-        let tls_config = match config.crypto {
-            None => panic!("missing cfg"),
-            Some(ref crypto_paths) => {
-                let crypto = config::Crypto::from_crypto_cfg(crypto_paths)?;
-
-                quinn::ServerConfig::with_single_cert(crypto.certs, crypto.key)?
-            }
-        };
-        let endpoint = quinn::Endpoint::server(tls_config, config.addr)?;
-
-        Ok(QuicServer {
-            server: endpoint,
-            config: config.into(),
-            token,
-            active_tunnels: Arc::new(ActiveTunnels::new().into()),
-            handlers: JoinSet::new(),
-        })
-    }
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.token.cancel();
-        while self.handlers.join_next().await.is_some() {
-            // intentionally blank
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "QuicSupervisor", level = "info", skip_all)]
-    pub async fn run(&mut self) -> Result<()> {
-        info!("TLS enabled. All connections to Clients will be encrypted.");
-        loop {
-            let incoming = tokio::select! {
-                maybe_accept = self.server.accept() => {
-                    match maybe_accept {
-                        None => {
-                            info!("Failed to accept new client");
-                            break
-                        }
-                        Some(s) => s,
-                    }
-                }
-
-                _ = self.token.cancelled() => {
-                    return Ok(())
-                }
-            };
-            let id = incoming.orig_dst_cid();
-            let conn = incoming.await?;
-
-            let mut h = QuicStream::new(
-                self.config.clone(),
-                self.token.clone(),
-                self.active_tunnels.clone(),
-                id,
-                conn,
-            )?;
-            self.handlers.spawn(async move {
-                trace!(addr = ?id, "client handler start");
-                if let Err(e) = h.run().await {
-                    error!(cause = ?e, addr = ?id, "client connection dropped");
-                }
-                trace!(addr = ?id, "client handler end");
-            });
-        }
-        self.shutdown().await?;
-        Ok(())
-    }
-}
-
-pub struct QuicBox {
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
-}
-
-impl QuicBox {
-    pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
-        QuicBox { send, recv }
-    }
-
-    pub fn id(&self) -> (quinn::StreamId, quinn::StreamId) {
-        (self.send.id(), self.recv.id())
-    }
-}
-impl Unpin for QuicBox {}
-
-impl tokio::io::AsyncWrite for QuicBox {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().send)
-            .poll_write(cx, buf)
-            .map_err(Into::into)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<tokio::io::Result<()>> {
-        Pin::new(&mut self.get_mut().send).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<tokio::io::Result<()>> {
-        Pin::new(&mut self.get_mut().send).poll_shutdown(cx)
-    }
-}
-
-impl tokio::io::AsyncRead for QuicBox {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.recv).poll_read(cx, buf)
-    }
-}
-
-pub struct QuicStream {
-    config: Arc<config::Config>,
-    token: CancellationToken,
-    active_tunnels: Arc<Mutex<ActiveTunnels>>,
-    id: quinn::ConnectionId,
-    conn: quinn::Connection,
-
-    handlers: JoinSet<()>,
-}
-impl QuicStream {
-    pub fn new(
-        config: Arc<config::Config>,
-        token: CancellationToken,
-        active_tunnels: Arc<Mutex<ActiveTunnels>>,
-        id: quinn::ConnectionId,
-        conn: quinn::Connection,
-    ) -> Result<Self> {
-        Ok(QuicStream {
-            config,
-            token,
-            active_tunnels,
-            handlers: JoinSet::new(),
-            id,
-            conn,
-        })
-    }
-    #[tracing::instrument(name = "QuicSupervisor", level = "info", skip_all)]
-    pub async fn run(&mut self) -> Result<()> {
-        loop {
-            tokio::select! {
-                    _ = self.token.cancelled() => {
-                        return Ok(());
-                    }
-
-                    stream = self.conn.accept_bi() => {
-                    let stream = match stream {
-                        Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            return Err(e.into());
-                        }
-                        Ok(s) => s,
-                    };
-                        let id = crate::net::transport::StreamId::Quic(self.id, stream.0.id(), stream.1.id());
-                        let b = QuicBox{send: stream.0, recv: stream.1};
-                        let mut h = ClientHandler::new(
-                            self.config.clone(),
-                            self.token.clone(),
-                            self.active_tunnels.clone(),
-                            (id.clone(), Box::new(b)),
-                        );
-                        self.handlers.spawn(async move {
-                            trace!(addr = ?id, "client handler start");
-                            if let Err(e) = h.run().await {
-                                error!(cause = ?e, addr = ?id, "client connection dropped");
-                            }
-                            trace!(addr = ?id, "client handler end");
-                        });
-
-                    }
-
-            }
-        }
-    }
-}
-
-pub struct Server {
+pub struct TcpServer {
     config: Arc<config::Config>,
     token: CancellationToken,
     listener: tnet::TcpListener,
@@ -238,7 +41,7 @@ pub struct Server {
     handlers: JoinSet<()>,
 }
 
-impl Server {
+impl TcpServer {
     pub fn new(
         config: config::Config,
         token: CancellationToken,
@@ -256,7 +59,7 @@ impl Server {
                 Some(TlsAcceptor::from(Arc::new(tls_config)))
             }
         };
-        Ok(Server {
+        Ok(TcpServer {
             config: config.into(),
             token,
             listener,
@@ -343,7 +146,7 @@ impl Server {
     }
 }
 
-struct ClientHandler<T>
+pub struct ClientHandler<T>
 where
     T: stnet::Stream,
 {
@@ -364,7 +167,7 @@ impl<T> ClientHandler<T>
 where
     T: stnet::Stream,
 {
-    fn new(
+    pub fn new(
         config: Arc<config::Config>,
         token: CancellationToken,
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
@@ -388,12 +191,9 @@ where
     async fn auth(&mut self) -> ClientResult<()> {
         info!(addr = ?self.peer_addr, "accepted connection from client");
 
-        let frame = self.transport.read_frame().await?;
+        let key = self.transport.read_helo().await?;
+
         {
-            let auth = match frame {
-                stnet::Frame::Auth(ref auth) => auth,
-                _ => return Err(stnet::Error::UnexpectedFrame.into()),
-            };
             use argon2::{
                 password_hash::{PasswordHasher, PasswordVerifier, SaltString},
                 Argon2,
@@ -404,7 +204,7 @@ where
             // are guaranteed to be the same and then use verify_password
             // to perform constant time comparison. If we didn't do this,
             // constant_time_eq would return false immediately on dissimilar
-            // lengths, which could lead to timing attacks
+            // lengths, which could reveal key length
             //
             // TODO We should probably support encoding the PSK on disk as
             // a PHC string with randomly generated salt.
@@ -412,14 +212,12 @@ where
             let our_hash = argon2
                 .hash_password(self.config.psk.as_bytes(), &lolsalt)
                 .map_err(|_| ClientValidationError::IncorrectPSK)?;
-            if argon2
-                .verify_password(auth.0.as_bytes(), &our_hash)
-                .is_err()
-            {
+            if argon2.verify_password(&key, &our_hash).is_err() {
                 return Err(ClientValidationError::IncorrectPSK);
             }
         }
-        self.transport.write_frame(frame).await?; // ack the auth
+        let frame = stnet::Frame::Auth(key);
+        self.transport.write_frame(frame).await?;
         Ok(())
     }
 
@@ -483,7 +281,7 @@ where
     }
 
     #[tracing::instrument(name = "Server", level = "info", skip_all)]
-    async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         use std::time::Duration;
         use tokio::time;
 

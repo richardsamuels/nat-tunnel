@@ -82,13 +82,14 @@ async fn main() {
 }
 
 // addr Should(tm) be either:
-// 1. ipv6 address and port
-// 2. ipv4 address and port
-// 3. hostname and port
-// from that we need to provide just the part before the port number
-// except if it's an ipv6 address, in which case we need to remove
-// the square brackets
-// so I ask, why isn't this in quinn? Why do i have to impl this.
+// 1. ipv6 address [:port]
+// 2. ipv4 address [:port]
+// 3. hostname [:port]
+// From that we need to provide just the part before the port number (excluding)
+// the ':', unless it's an ipv6 address, in which case we need to remove
+// the square brackets too.
+// Given that this is necessary for quinn to connect,
+// I wonder why this func isn't in quinn?
 fn why_do_i_have_to_impl_this(addr: &str) -> &str {
     let port_index = addr.rfind(':').unwrap_or(addr.len());
     // If it's an ipv6 address, strip it out

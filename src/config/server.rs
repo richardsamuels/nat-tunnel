@@ -49,6 +49,8 @@ pub fn load_config(config: &Path) -> CResult<Config> {
     toml::from_str(&config_contents).with_context(|_| crate::config::DecodeSnafu {})
 }
 
+// Note: we defer parsing the file because keys/certs can't
+// /shouldn't be moved around in memory
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CryptoConfig {
     #[serde(deserialize_with = "de_key_file")]

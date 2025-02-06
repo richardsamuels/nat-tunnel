@@ -2,6 +2,7 @@ use crate::net as stnet;
 use crate::net::error::*;
 use crate::net::frame::*;
 use futures::{SinkExt, TryStreamExt};
+use snafu::ResultExt;
 use std::marker::Unpin;
 use std::net::SocketAddr;
 use tokio_util::codec;
@@ -55,6 +56,85 @@ where
         Transport {
             framed: frame(stream),
         }
+    }
+
+    // Helo takes place outside of Framed because it's a rather
+    // dangerous op. We need to validate the client as quickly as possible
+    // w/o reading too much data
+    pub async fn read_helo(&mut self) -> Result<Vec<u8>> {
+        let stream = self.framed.get_mut().get_mut();
+        let mut magic = [0x00; 4];
+        stream
+            .read(&mut magic)
+            .await
+            .with_context(|_| crate::net::IoSnafu {
+                message: "failed to read protocol header",
+            })?;
+        if magic[0] != 0xFA {
+            return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
+        }
+        if magic[1] != 0x0 {
+            return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
+        }
+
+        let size = u16::from_be_bytes([magic[2], magic[3]]);
+        if size >= 512 {
+            return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
+        }
+
+        let mut buf = vec![0x00; size.into()];
+
+        let maybe_read = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stream.read_exact(&mut buf),
+        )
+        .await;
+
+        match maybe_read {
+            Err(_) => {
+                error!("read timeout");
+                return Err(stnet::Error::Other {
+                    message: "read timeout".to_string(),
+                    backtrace: snafu::Backtrace::capture(),
+                });
+            }
+            Ok(Err(e)) if reconnectable_err(&e) => {
+                return Err(Error::ConnectionDead);
+            }
+            Ok(Err(e)) => {
+                return Err(stnet::Error::Io {
+                    message: "failed to read helo".to_string(),
+                    source: e,
+                    backtrace: snafu::Backtrace::capture(),
+                })
+            }
+            Ok(Ok(_)) => (),
+        };
+        Ok(buf)
+    }
+
+    pub async fn send_helo(&mut self, key: &[u8]) -> Result<()> {
+        // Magic byte + protocol version num
+        let mut magic = vec![0xFA, 0x00];
+        let l = key.len();
+        if l >= 512 {
+            return Err(crate::net::transport::OtherSnafu {
+                message: "bad key length",
+            }
+            .build());
+        }
+        magic.extend(&(l as u16).to_be_bytes());
+        magic.extend_from_slice(key);
+        self.framed
+            .get_mut()
+            .get_mut()
+            .write(&magic)
+            .await
+            .with_context(|_| crate::net::transport::IoSnafu {
+                message: "failed to write helo",
+            })?;
+
+        Ok(())
     }
 
     //pub async fn shutdown(&mut self) -> std::io::Result<()> {
