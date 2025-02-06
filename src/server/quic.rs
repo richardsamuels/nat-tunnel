@@ -33,7 +33,7 @@ impl QuicServer {
             handlers: JoinSet::new(),
         })
     }
-    pub async fn shutdown(&mut self) -> Result<()> {
+    async fn shutdown(&mut self) -> Result<()> {
         self.token.cancel();
         while self.handlers.join_next().await.is_some() {
             // intentionally blank
@@ -41,7 +41,7 @@ impl QuicServer {
         Ok(())
     }
 
-    #[tracing::instrument(name = "QuicSupervisor", level = "info", skip_all)]
+    #[tracing::instrument(name = "QuicListener", level = "info", skip_all)]
     pub async fn run(&mut self) -> Result<()> {
         info!("TLS enabled. All connections to Clients will be encrypted.");
         loop {

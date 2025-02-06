@@ -30,7 +30,6 @@ async fn main() -> Result<()> {
     // TODO wow lazy
     match c.transport {
         config::Transport::Tcp => {
-            info!("listening on {}", &c.addr);
             let listener = tnet::TcpListener::bind(c.addr).await?;
             let mut transport = server::TcpServer::new(c, token.clone(), listener).unwrap();
 
@@ -38,7 +37,6 @@ async fn main() -> Result<()> {
                 ret = transport.run() => return ret,
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received SIGINT. Terminating all connections and shutting down...");
-                    transport.shutdown().await?;
                 }
             };
         }
@@ -48,7 +46,6 @@ async fn main() -> Result<()> {
                 ret = transport.run() => return ret,
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received SIGINT. Terminating all connections and shutting down...");
-                    transport.shutdown().await?;
                 }
             };
         }

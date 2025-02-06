@@ -59,6 +59,7 @@ impl TcpServer {
                 Some(TlsAcceptor::from(Arc::new(tls_config)))
             }
         };
+
         Ok(TcpServer {
             config: config.into(),
             token,
@@ -68,7 +69,7 @@ impl TcpServer {
             handlers: JoinSet::new(),
         })
     }
-    pub async fn shutdown(&mut self) -> Result<()> {
+    async fn shutdown(&mut self) -> Result<()> {
         self.token.cancel();
         while self.handlers.join_next().await.is_some() {
             // intentionally blank
@@ -76,14 +77,15 @@ impl TcpServer {
         Ok(())
     }
 
-    #[tracing::instrument(name = "Supervisor", level = "info", skip_all)]
+    #[tracing::instrument(name = "TcpSupervisor", level = "info", skip_all)]
     pub async fn run(&mut self) -> Result<()> {
+        info!("listening on {}", &self.config.addr);
         if self.tls.is_some() {
             info!("TLS enabled. All connections to Clients will be encrypted.");
         } else {
             warn!("TLS *DISABLED*. All data is transmitted in the clear.");
         }
-        loop {
+        let ret = loop {
             let (socket, addr) = tokio::select! {
                 maybe_accept = self.listener.accept() => {
                     match maybe_accept {
@@ -96,7 +98,7 @@ impl TcpServer {
                 }
 
                 _ = self.token.cancelled() => {
-                    return Ok(())
+                    break Ok(())
                 }
             };
             if let Err(e) = socket.set_nodelay(true) {
@@ -142,7 +144,9 @@ impl TcpServer {
                     trace!(addr = ?addr, "client handler end");
                 });
             }
-        }
+        };
+        self.shutdown().await?;
+        ret
     }
 }
 
