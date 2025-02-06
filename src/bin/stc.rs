@@ -114,21 +114,50 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     //let mut endpoint = quinn::Endpoint::client((std::net::Ipv4Addr::UNSPECIFIED, 0).into())?;
     endpoint.set_default_client_config(client_config);
 
-    let addrs = c.addr.to_socket_addrs()?.next().expect("resolved addr");
-    info!("Resolved addrs: {addrs}");
+    let addrs: Vec<_> = c.addr.to_socket_addrs()?.collect();
     let expected_host = why_do_i_have_to_impl_this(&c.addr);
 
-    let conn = tokio::select! {
-        maybe_endpoint = endpoint.connect("173.255.237.84:12345".parse().unwrap(), expected_host)? => maybe_endpoint.expect("Connection failed"),
+    #[allow(clippy::never_loop)]
+    let conn = 'outer: loop {
+        for addr in &addrs {
+            let conn_ft = endpoint.connect(*addr, expected_host);
+            if conn_ft.is_err() {
+                continue;
+            }
+            let ft = tokio::time::timeout(std::time::Duration::from_secs(1), conn_ft.unwrap());
+            let maybe_conn = tokio::select! {
+                maybe_conn = ft => {
+                    match maybe_conn {
+                        Err(e) => {
+                            tracing::trace!(addr = ?addr, error = ?e, "timeout occurred while connecting, trying next addr");
+                            continue;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::trace!(addr = ?addr, error = ?e, "error occurred while connecting, trying next addr");
+                            continue;
+                        }
+                        Ok(Ok(conn)) => Some(conn),
+                    }
+                }
 
-        _ = token.cancelled() => {
-            return Ok(())
+                _ = token.cancelled() => {
+                    return Ok(());
+                }
+            };
+
+            if let Some(conn) = maybe_conn {
+                break 'outer conn;
+            }
         }
+
+        error!(addrs=?addrs, "Failed to establish connection on any resolved addr");
+        panic!("programmer patience error");
     };
+
     let (send, recv) = conn.open_bi().await.expect("failed to open stream");
 
     let id = stnet::StreamId::Quic(
-        quinn_proto::ConnectionId::new(&[0x00]), // TODO ???
+        quinn_proto::ConnectionId::new(&[0x00]),
         send.id(),
         recv.id(),
     );
