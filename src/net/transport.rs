@@ -48,6 +48,8 @@ pub struct Transport<T> {
     framed: Framed<T>,
 }
 
+const MAGIC: u8 = 0xFA;
+const PROTOCOL_VERSION: u8 = 0x00;
 impl<T> Transport<T>
 where
     T: Stream,
@@ -89,15 +91,15 @@ where
             Ok(Ok(_)) => (),
         };
 
-        if magic[0] != 0xFA {
+        if magic[0] != MAGIC {
             return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
         }
-        if magic[1] != 0x0 {
+        if magic[1] != PROTOCOL_VERSION {
             return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
         }
 
         let size = u16::from_be_bytes([magic[2], magic[3]]);
-        if size >= 512 {
+        if size as usize > crate::config::PSK_MAX_LEN {
             tracing::error!("server sent key with invalid length {size}");
             return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
         }
@@ -133,8 +135,7 @@ where
     }
 
     pub async fn send_helo(&mut self, key: &[u8]) -> Result<()> {
-        // Magic byte + protocol version num
-        let mut magic = vec![0xFA, 0x00];
+        let mut magic = vec![MAGIC, PROTOCOL_VERSION];
         let l = key.len();
         magic.extend(&(l as u16).to_be_bytes());
         magic.extend_from_slice(key);

@@ -36,6 +36,7 @@ fn default_stream_channel() -> usize {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(deserialize_with = "super::common::de_psk")]
     pub psk: String,
     pub addr: SocketAddr,
     #[serde(default)]

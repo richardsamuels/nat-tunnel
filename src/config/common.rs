@@ -133,3 +133,16 @@ impl<'de> Deserialize<'de> for Timeout {
         deserializer.deserialize_map(TimeoutVisitor)
     }
 }
+pub const PSK_MAX_LEN: usize = 512;
+pub fn de_psk<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let psk: String = String::deserialize(deserializer)?;
+    if psk.is_empty() || psk.len() > PSK_MAX_LEN {
+        return Err(serde::de::Error::custom(format!(
+            "psk must be non-empty and at most {PSK_MAX_LEN} bytes long"
+        )));
+    }
+    Ok(psk)
+}

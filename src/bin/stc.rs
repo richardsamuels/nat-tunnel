@@ -20,7 +20,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> color_eyre::Result<()> {
     tracing_subscriber::fmt::init();
     color_eyre::install().unwrap();
     let args = Args::parse();
@@ -58,7 +58,7 @@ async fn main() {
             Ok(_) => exit(0),
             Err(e) if matches!(e.downcast_ref(), Some(Error::ConnectionDead)) => {
                 if token.is_cancelled() {
-                    exit(0);
+                    return Ok(());
                 }
                 if last_failure.elapsed() >= std::time::Duration::from_secs(5) {
                     failures = 0;
@@ -67,13 +67,13 @@ async fn main() {
                 failures += 1;
                 if failures >= 5 {
                     error!("client has failed 5 times in 5 seconds. Exiting");
-                    exit(1);
+                    return Err(e);
                 }
                 error!(cause = ?e, "client has failed. attempting recovery");
             }
             Err(e) => {
                 error!(cause = ?e, "client has failed with unrecoverable error");
-                exit(1);
+                return Err(e);
             }
         }
     }

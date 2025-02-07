@@ -25,7 +25,7 @@ impl Default for ChannelLimits {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
-    #[serde(deserialize_with = "de_psk")]
+    #[serde(deserialize_with = "super::common::de_psk")]
     pub psk: String,
     pub addr: String,
     #[serde(default)]
@@ -48,19 +48,6 @@ where
     let tunnels: Vec<Tunnel> = Vec::<Tunnel>::deserialize(deserializer)?;
     let tunnel_map: HashMap<_, _> = tunnels.into_iter().map(|c| (c.remote_port, c)).collect();
     Ok(tunnel_map)
-}
-
-fn de_psk<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let psk: String = String::deserialize(deserializer)?;
-    if psk.is_empty() || psk.len() > 512 {
-        return Err(serde::de::Error::custom(
-            "psk must be non-empty and at most 512 bytes long",
-        ));
-    }
-    Ok(psk)
 }
 
 fn default_mtu() -> u16 {
