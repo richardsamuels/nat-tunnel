@@ -1,8 +1,8 @@
-pub mod frame;
+mod frame;
 pub use frame::*;
 
-pub mod error;
+mod error;
 pub use error::*;
 
-pub mod transport;
+mod transport;
 pub use transport::*;

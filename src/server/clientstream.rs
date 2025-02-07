@@ -1,17 +1,12 @@
-use crate::{config::server as config, net as stnet, redirector::Redirector, Result};
+use super::common::*;
+use crate::{config::server as config, net as stnet, Result};
 use snafu::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tokio::net as tnet;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
-use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace, warn};
-
-type TunnelChannels = HashMap<SocketAddr, mpsc::Sender<stnet::RedirectorFrame>>;
-type ActiveTunnels = HashSet<u16>;
+use tracing::{error, info, trace};
 
 #[derive(Snafu, Debug)]
 enum ClientValidationError {
@@ -33,122 +28,7 @@ impl std::convert::From<stnet::Error> for ClientValidationError {
 
 type ClientResult<T> = std::result::Result<T, ClientValidationError>;
 
-pub struct Server {
-    config: Arc<config::Config>,
-    token: CancellationToken,
-    listener: tnet::TcpListener,
-    active_tunnels: Arc<Mutex<ActiveTunnels>>,
-
-    tls: Option<TlsAcceptor>,
-    handlers: JoinSet<()>,
-}
-
-impl Server {
-    pub fn new(
-        config: config::Config,
-        token: CancellationToken,
-        listener: tnet::TcpListener,
-    ) -> Result<Self> {
-        let acceptor = match config.crypto {
-            None => None,
-            Some(ref crypto_paths) => {
-                let crypto = config::Crypto::from_crypto_cfg(crypto_paths)?;
-
-                let tls_config = rustls::ServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_single_cert(crypto.certs, crypto.key)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                Some(TlsAcceptor::from(Arc::new(tls_config)))
-            }
-        };
-        Ok(Server {
-            config: config.into(),
-            token,
-            listener,
-            active_tunnels: Arc::new(ActiveTunnels::new().into()),
-            tls: acceptor,
-            handlers: JoinSet::new(),
-        })
-    }
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.token.cancel();
-        while self.handlers.join_next().await.is_some() {
-            // intentionally blank
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "Supervisor", level = "info", skip_all)]
-    pub async fn run(&mut self) -> Result<()> {
-        if self.tls.is_some() {
-            info!("TLS enabled. All connections to Clients will be encrypted.");
-        } else {
-            warn!("TLS *DISABLED*. All data is transmitted in the clear.");
-        }
-        loop {
-            let (socket, addr) = tokio::select! {
-                maybe_accept = self.listener.accept() => {
-                    match maybe_accept {
-                        Err(e) => {
-                            error!(cause = ?e, "Failed to accept new client");
-                            continue;
-                        }
-                        Ok(s) => s,
-                    }
-                }
-
-                _ = self.token.cancelled() => {
-                    return Ok(())
-                }
-            };
-            if let Err(e) = socket.set_nodelay(true) {
-                error!(e=?e, "Failed to set TCP_NODELAY on socket");
-                continue;
-            };
-
-            if let Some(tls) = &self.tls {
-                let peer_addr = socket.peer_addr().expect("ip");
-                let socket = match tls.accept(socket).await {
-                    Err(e) => {
-                        error!(cause = ?e, addr = ?addr, "client connection dropped (failed to negotiate TLS)");
-                        continue;
-                    }
-                    Ok(socket) => Box::new(socket),
-                };
-                let mut h = ClientHandler::new(
-                    self.config.clone(),
-                    self.token.clone(),
-                    self.active_tunnels.clone(),
-                    (peer_addr, socket),
-                );
-                self.handlers.spawn(async move {
-                    trace!(addr = ?addr, "client handler start");
-                    if let Err(e) = h.run().await {
-                        error!(cause = ?e, addr = ?addr, "client connection dropped");
-                    }
-                    trace!(addr = ?addr, "client handler end");
-                });
-            } else {
-                let peer_addr = socket.peer_addr().expect("ip");
-                let mut h = ClientHandler::new(
-                    self.config.clone(),
-                    self.token.clone(),
-                    self.active_tunnels.clone(),
-                    (peer_addr, Box::new(socket)),
-                );
-                self.handlers.spawn(async move {
-                    trace!(addr = ?addr, "client handler start");
-                    if let Err(e) = h.run().await {
-                        error!(cause = ?e, addr = ?addr, "client connection dropped");
-                    }
-                    trace!(addr = ?addr, "client handler end");
-                });
-            }
-        }
-    }
-}
-
-struct ClientHandler<T>
+pub struct ClientHandler<T>
 where
     T: stnet::Stream,
 {
@@ -169,17 +49,17 @@ impl<T> ClientHandler<T>
 where
     T: stnet::Stream,
 {
-    fn new(
+    pub fn new(
         config: Arc<config::Config>,
         token: CancellationToken,
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
         stream: stnet::AcceptedStream<T>,
     ) -> ClientHandler<T> {
-        let (tx, rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::channel(config.channel_limits.core);
         let (peer_addr, stream) = stream;
         ClientHandler {
             peer_addr,
-            transport: stnet::Transport::new(stream),
+            transport: stnet::Transport::new(config.timeouts.clone(), stream),
             token,
             active_tunnels,
             config,
@@ -193,14 +73,11 @@ where
     async fn auth(&mut self) -> ClientResult<()> {
         info!(addr = ?self.peer_addr, "accepted connection from client");
 
-        let frame = self.transport.read_frame().await?;
+        let key = self.transport.read_helo().await?;
+
         {
-            let auth = match frame {
-                stnet::Frame::Auth(ref auth) => auth,
-                _ => return Err(stnet::Error::UnexpectedFrame.into()),
-            };
             use argon2::{
-                password_hash::{PasswordHasher, PasswordVerifier, SaltString},
+                password_hash::{rand_core::OsRng, PasswordHasher, PasswordVerifier, SaltString},
                 Argon2,
             };
             let argon2 = Argon2::default();
@@ -209,22 +86,20 @@ where
             // are guaranteed to be the same and then use verify_password
             // to perform constant time comparison. If we didn't do this,
             // constant_time_eq would return false immediately on dissimilar
-            // lengths, which could lead to timing attacks
+            // lengths, which could reveal key length
             //
             // TODO We should probably support encoding the PSK on disk as
             // a PHC string with randomly generated salt.
-            let lolsalt = SaltString::from_b64("dontcaredontcaredontcare").unwrap();
+            let salt = SaltString::generate(&mut OsRng);
             let our_hash = argon2
-                .hash_password(self.config.psk.as_bytes(), &lolsalt)
+                .hash_password(self.config.psk.as_bytes(), &salt)
                 .map_err(|_| ClientValidationError::IncorrectPSK)?;
-            if argon2
-                .verify_password(auth.0.as_bytes(), &our_hash)
-                .is_err()
-            {
+            if argon2.verify_password(&key, &our_hash).is_err() {
                 return Err(ClientValidationError::IncorrectPSK);
             }
         }
-        self.transport.write_frame(frame).await?; // ack the auth
+        let frame = stnet::Frame::Auth(key);
+        self.transport.write_frame(frame).await?;
         Ok(())
     }
 
@@ -270,7 +145,7 @@ where
             let token = self.token.clone();
             let h = tokio::spawn(async move {
                 trace!(port = ?port, "external listener start");
-                let mut h = ExternalListener::new(port, mtu, token, to_tunnels, to_client);
+                let mut h = super::TunnelSupervisor::new(port, mtu, token, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
@@ -288,8 +163,7 @@ where
     }
 
     #[tracing::instrument(name = "Server", level = "info", skip_all)]
-    async fn run(&mut self) -> Result<()> {
-        use std::time::Duration;
+    pub async fn run(&mut self) -> Result<()> {
         use tokio::time;
 
         if let Err(e) = self.auth().await {
@@ -297,19 +171,19 @@ where
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
         };
         let handlers = self.make_tunnels().await?;
-        let mut heartbeat_interval = time::interval(Duration::from_secs(60));
+        let mut heartbeat_interval = time::interval(self.config.timeouts.heartbeat_interval);
         // SAFETY: The first .tick() resolves immediately. This ensures
         // that when the loop starts, the next time this interval ticks is
         // 60 seconds from now
         heartbeat_interval.tick().await;
         let mut last_recv_heartbeat =
-            std::time::Instant::now() + std::time::Duration::from_secs(60);
+            std::time::Instant::now() + self.config.timeouts.heartbeat_interval;
 
         let ret = loop {
             // XXX You MUST NOT return in this loop
             tokio::select! {
                 _maybe_interval = heartbeat_interval.tick() => {
-                    if last_recv_heartbeat.elapsed().as_secs() > 60 {
+                    if last_recv_heartbeat.elapsed() > 2*self.config.timeouts.heartbeat_interval {
                         error!("Missing heartbeat from client. Killing connection");
                         break Err(stnet::Error::ConnectionDead.into());
                     }
@@ -327,7 +201,7 @@ where
                         Some(data) => data,
                     };
                     match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
+                        self.config.timeouts.write,
                         self.transport.write_frame(rframe.into())
                     ).await {
                         Ok(Ok(_)) => (),
@@ -368,7 +242,9 @@ where
                             let id = r.id();
                             match self.get_tunnel_tx(*id) {
                                 None => error!(addr = ?id, "no channel for port. connection already killed?"),
-                                Some(tx) => tx.send(r).await?,
+                                Some(tx) => {
+                                    let _ = tx.send(r).await;
+                                },
                             }
                         }
 
@@ -402,86 +278,5 @@ where
             tunnels.clear();
         }
         ret
-    }
-}
-
-struct ExternalListener {
-    remote_port: u16,
-    mtu: u16,
-    token: CancellationToken,
-    to_client: mpsc::Sender<stnet::RedirectorFrame>,
-    tunnels: Arc<Mutex<TunnelChannels>>,
-}
-
-impl ExternalListener {
-    fn new(
-        remote_port: u16,
-        mtu: u16,
-        token: CancellationToken,
-        tunnels: Arc<Mutex<TunnelChannels>>,
-        to_client: mpsc::Sender<stnet::RedirectorFrame>,
-    ) -> Self {
-        ExternalListener {
-            remote_port,
-            mtu,
-            token,
-            tunnels,
-            to_client,
-        }
-    }
-
-    #[tracing::instrument(name = "External", level = "info", skip_all)]
-    async fn run(&mut self) -> Result<()> {
-        // TODO support more protocols, including TCP+TLS/QUIC
-        let external_listener =
-            tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
-        loop {
-            let (external_stream, external_addr) = tokio::select! {
-                maybe_accept = external_listener.accept() => match maybe_accept{
-                    Err(e) => {
-                        error!(cause = ?e, "failed to accept client");
-                        continue
-                    }
-                    Ok(s) => s,
-                },
-
-                _ = self.token.cancelled() => break Ok(()),
-            };
-
-            info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
-            self.to_client
-                .send(stnet::RedirectorFrame::StartListener(
-                    external_addr,
-                    self.remote_port,
-                ))
-                .await?;
-
-            let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
-            {
-                let mut tunnels = self.tunnels.lock().unwrap();
-                tunnels.insert(external_addr, to_tunnel);
-            }
-
-            let port = self.remote_port;
-            let mtu = self.mtu;
-            let to_client = self.to_client.clone();
-            let tunnels = self.tunnels.clone();
-            let token = self.token.clone();
-            tokio::spawn(async move {
-                let mut r = Redirector::with_stream(
-                    external_addr,
-                    port,
-                    mtu,
-                    token,
-                    external_stream,
-                    to_client,
-                    from_client,
-                );
-                r.run().await;
-                let mut tunnels = tunnels.lock().unwrap();
-                tunnels.remove(&external_addr);
-                trace!(addr = ?external_addr, "Tunnel done");
-            });
-        }
     }
 }

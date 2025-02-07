@@ -3,7 +3,7 @@ use snafu::prelude::*;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Snafu, Debug)]
-#[snafu(visibility(pub(crate)))]
+#[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("connection has died"))]
     ConnectionDead,
@@ -13,6 +13,11 @@ pub enum Error {
     Io {
         message: String,
         source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("{context} timed out"))]
+    IoTimeout {
+        context: String,
         backtrace: snafu::Backtrace,
     },
     #[snafu(display("msgpack decode error"))]

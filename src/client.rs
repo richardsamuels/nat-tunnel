@@ -31,12 +31,12 @@ where
         peer_addr: stnet::StreamId,
         stream: T,
     ) -> Client<T> {
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(config.channel_limits.core);
         Client {
+            transport: stnet::Transport::new(config.timeouts.clone(), stream),
             peer_addr,
             config,
             token,
-            transport: stnet::Transport::new(stream),
             handlers: JoinSet::new(),
             to_server: tx,
             from_internal: rx,
@@ -45,9 +45,7 @@ where
     }
 
     async fn push_tunnel_config(&mut self) -> Result<()> {
-        self.transport
-            .write_frame(Frame::Auth(self.config.psk.clone().into()))
-            .await?;
+        self.transport.send_helo(self.config.psk.as_bytes()).await?;
 
         let frame = self.transport.read_frame().await?;
         let stnet::Frame::Auth(_) = frame else {
@@ -163,7 +161,7 @@ where
         let to_server = self.to_server.clone();
         let token = self.token.clone();
         let mtu = self.config.mtu;
-        let (to_internal, from_internal) = mpsc::channel(16);
+        let (to_internal, from_internal) = mpsc::channel(self.config.channel_limits.core);
         self.to_internal.insert(id, to_internal);
         self.handlers.spawn(async move {
             let mut r = Redirector::with_stream(

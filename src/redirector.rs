@@ -9,7 +9,7 @@ use tracing::{error, trace};
 pub const PROTOCOL_OVERHEAD: u16 = 53;
 
 /// Reads data from stream, and send it along the `tx` channel
-/// Reads data from rx chnnale, and send it along the stream
+/// Reads data from rx channel, and send it along the stream
 pub struct Redirector<T: stnet::Stream> {
     id: SocketAddr,
     port: u16,

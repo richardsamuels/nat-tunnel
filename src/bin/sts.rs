@@ -24,19 +24,36 @@ async fn main() -> Result<()> {
     if c.crypto.is_none() && !args.allow_insecure_transport {
         panic!("Insecure transport in use without --allow-insecure-transport");
     }
-
-    info!("listening on {}", &c.addr);
-    let listener = tnet::TcpListener::bind(c.addr).await?;
+    if c.crypto.is_none() && matches!(c.transport, simple_tunnel::config::Transport::Quic) {
+        panic!("QUIC is enabled, but TLS cert/key file were not provided. Try setting `transport = \"tcp\"` or providing cert/key file");
+    }
 
     let token = CancellationToken::new();
-    let mut transport = server::Server::new(c, token.clone(), listener).unwrap();
 
-    tokio::select! {
-        ret = transport.run() => return ret,
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received SIGINT. Terminating all connections and shutting down...");
-            transport.shutdown().await?;
+    // TODO wow lazy
+    use simple_tunnel::config::Transport;
+    match c.transport {
+        Transport::Tcp => {
+            let listener = tnet::TcpListener::bind(c.addr).await?;
+            let mut transport = server::TcpServer::new(c, token.clone(), listener).unwrap();
+
+            tokio::select! {
+                ret = transport.run() => return ret,
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT. Terminating all connections and shutting down...");
+                }
+            };
+        }
+        Transport::Quic => {
+            let mut transport = server::QuicServer::new(c, token.clone()).unwrap();
+            tokio::select! {
+                ret = transport.run() => return ret,
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT. Terminating all connections and shutting down...");
+                }
+            };
         }
     };
+
     Ok(())
 }

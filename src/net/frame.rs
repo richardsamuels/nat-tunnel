@@ -1,4 +1,3 @@
-use crate::string::LimitedString;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::vec::Vec;
@@ -29,7 +28,7 @@ impl std::convert::From<Datagram> for RedirectorFrame {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Frame {
-    Auth(LimitedString<512>),
+    Auth(Vec<u8>),
     Tunnels(Vec<u16>),
     ListenerStart(SocketAddr),
     Redirector(RedirectorFrame),

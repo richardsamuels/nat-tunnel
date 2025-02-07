@@ -8,15 +8,37 @@ use std::path::{Path, PathBuf};
 use std::vec::Vec;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ChannelLimits {
+    // The size of the channel that sends data from a tunnel to the
+    // client/server
+    #[serde(default = "super::common::default_core_channel")]
+    pub core: usize,
+}
+
+impl Default for ChannelLimits {
+    fn default() -> Self {
+        Self {
+            core: super::common::default_core_channel(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
-    #[serde(deserialize_with = "de_psk")]
+    #[serde(deserialize_with = "super::common::de_psk")]
     pub psk: String,
     pub addr: String,
+    #[serde(default)]
+    pub transport: super::common::Transport,
     #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
     #[serde(deserialize_with = "de_tunnels")]
     pub tunnels: HashMap<u16, Tunnel>,
     pub crypto: Option<CryptoConfig>,
+    #[serde(default)]
+    pub channel_limits: ChannelLimits,
+    #[serde(default)]
+    pub timeouts: super::common::Timeout,
 }
 
 fn de_tunnels<'de, D>(deserializer: D) -> std::result::Result<HashMap<u16, Tunnel>, D::Error>
@@ -26,19 +48,6 @@ where
     let tunnels: Vec<Tunnel> = Vec::<Tunnel>::deserialize(deserializer)?;
     let tunnel_map: HashMap<_, _> = tunnels.into_iter().map(|c| (c.remote_port, c)).collect();
     Ok(tunnel_map)
-}
-
-fn de_psk<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let psk: String = String::deserialize(deserializer)?;
-    if psk.is_empty() || psk.len() > 512 {
-        return Err(serde::de::Error::custom(
-            "psk must be non-empty and at most 512 bytes long",
-        ));
-    }
-    Ok(psk)
 }
 
 fn default_mtu() -> u16 {
@@ -58,6 +67,9 @@ where
 pub struct CryptoConfig {
     #[serde(default = "localhost_ipv4", deserialize_with = "de_sni_name")]
     pub sni_name: String,
+
+    // Note: we defer parsing the certificate file because keys/certs can't
+    // /shouldn't be moved around in memory
     #[serde(deserialize_with = "de_ca_file")]
     pub ca: Option<PathBuf>,
 }
