@@ -44,6 +44,7 @@ impl From<SocketAddr> for StreamId {
 pub type AcceptedStream<T: Stream> = (StreamId, T);
 
 pub struct Transport<T> {
+    timeouts: crate::config::Timeout,
     framed: Framed<T>,
 }
 
@@ -51,8 +52,9 @@ impl<T> Transport<T>
 where
     T: Stream,
 {
-    pub fn new(stream: T) -> Transport<T> {
+    pub fn new(timeouts: crate::config::Timeout, stream: T) -> Transport<T> {
         Transport {
+            timeouts,
             framed: frame(stream),
         }
     }
@@ -64,11 +66,8 @@ where
         let stream = self.framed.get_mut().get_mut();
         let mut magic = [0x00; 4];
 
-        let maybe_read = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            stream.read_exact(&mut magic),
-        )
-        .await;
+        let maybe_read =
+            tokio::time::timeout(self.timeouts.auth, stream.read_exact(&mut magic)).await;
 
         match maybe_read {
             Err(_) => {
@@ -173,8 +172,7 @@ where
     }
 
     pub async fn write_frame(&mut self, t: Frame) -> Result<()> {
-        let future =
-            tokio::time::timeout(std::time::Duration::from_secs(5), self.framed.send(t)).await;
+        let future = tokio::time::timeout(self.timeouts.write, self.framed.send(t)).await;
 
         match future {
             Err(_) => {

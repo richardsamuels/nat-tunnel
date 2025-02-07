@@ -8,17 +8,37 @@ use std::path::{Path, PathBuf};
 use std::vec::Vec;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ChannelLimits {
+    // The size of the channel that sends data from a tunnel to the
+    // client/server
+    #[serde(default = "super::common::default_core_channel")]
+    pub core: usize,
+}
+
+impl Default for ChannelLimits {
+    fn default() -> Self {
+        Self {
+            core: super::common::default_core_channel(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     #[serde(deserialize_with = "de_psk")]
     pub psk: String,
     pub addr: String,
     #[serde(default)]
-    pub transport: crate::config::server::Transport,
+    pub transport: super::common::Transport,
     #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
     #[serde(deserialize_with = "de_tunnels")]
     pub tunnels: HashMap<u16, Tunnel>,
     pub crypto: Option<CryptoConfig>,
+    #[serde(default)]
+    pub channel_limits: ChannelLimits,
+    #[serde(default)]
+    pub timeouts: super::common::Timeout,
 }
 
 fn de_tunnels<'de, D>(deserializer: D) -> std::result::Result<HashMap<u16, Tunnel>, D::Error>

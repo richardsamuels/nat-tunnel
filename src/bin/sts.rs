@@ -28,8 +28,9 @@ async fn main() -> Result<()> {
     let token = CancellationToken::new();
 
     // TODO wow lazy
+    use simple_tunnel::config::Transport;
     match c.transport {
-        config::Transport::Tcp => {
+        Transport::Tcp => {
             let listener = tnet::TcpListener::bind(c.addr).await?;
             let mut transport = server::TcpServer::new(c, token.clone(), listener).unwrap();
 
@@ -40,7 +41,7 @@ async fn main() -> Result<()> {
                 }
             };
         }
-        config::Transport::Quic => {
+        Transport::Quic => {
             let mut transport = server::QuicServer::new(c, token.clone()).unwrap();
             tokio::select! {
                 ret = transport.run() => return ret,

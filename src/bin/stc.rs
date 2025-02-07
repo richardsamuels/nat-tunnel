@@ -49,13 +49,10 @@ async fn main() {
     });
 
     loop {
+        use simple_tunnel::config::Transport;
         let ft = match c.transport {
-            simple_tunnel::config::server::Transport::Quic => {
-                run_quic(c.clone(), token.clone()).await
-            }
-            simple_tunnel::config::server::Transport::Tcp => {
-                run(c.clone(), token.clone(), &crypto_cfg).await
-            }
+            Transport::Quic => run_quic(c.clone(), token.clone()).await,
+            Transport::Tcp => run(c.clone(), token.clone(), &crypto_cfg).await,
         };
         match ft {
             Ok(_) => exit(0),
@@ -139,9 +136,13 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
 
     info!("Handshaking with {} via QUIC", &c.addr);
 
+    let mut tc = quinn::TransportConfig::default();
+    tc.max_idle_timeout(Some(c.timeouts.heartbeat_interval.try_into().unwrap()));
+
     let crypto_cfg = crypto_init2(&c.crypto.clone().expect("crypto is None"))?;
     let qcc = QuicClientConfig::try_from(crypto_cfg)?;
-    let client_config = quinn::ClientConfig::new(Arc::new(qcc));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(qcc));
+    client_config.transport_config(Arc::new(tc));
     let mut endpoint = quinn::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into())?;
     //let mut endpoint = quinn::Endpoint::client((std::net::Ipv4Addr::UNSPECIFIED, 0).into())?;
     endpoint.set_default_client_config(client_config);

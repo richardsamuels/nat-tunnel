@@ -9,12 +9,29 @@ use std::vec::Vec;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Transport {
-    Tcp,
-    #[default]
-    Quic,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ChannelLimits {
+    // The size of the channel that accepts incoming, unauthenticated, streams
+    #[serde(default = "default_stream_channel")]
+    pub stream_channels: usize,
+
+    // The size of the channel that sends data from a tunnel to the
+    // client/server
+    #[serde(default = "super::common::default_core_channel")]
+    pub core: usize,
+}
+
+impl Default for ChannelLimits {
+    fn default() -> Self {
+        Self {
+            stream_channels: default_stream_channel(),
+            core: super::common::default_core_channel(),
+        }
+    }
+}
+
+fn default_stream_channel() -> usize {
+    16
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -22,10 +39,14 @@ pub struct Config {
     pub psk: String,
     pub addr: SocketAddr,
     #[serde(default)]
-    pub transport: Transport,
+    pub transport: super::common::Transport,
     #[serde(default = "default_mtu", deserialize_with = "warn_mtu")]
     pub mtu: u16,
     pub crypto: Option<CryptoConfig>,
+    #[serde(default)]
+    pub channel_limits: ChannelLimits,
+    #[serde(default)]
+    pub timeouts: super::common::Timeout,
 }
 
 fn default_mtu() -> u16 {

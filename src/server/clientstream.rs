@@ -55,11 +55,11 @@ where
         active_tunnels: Arc<Mutex<ActiveTunnels>>,
         stream: stnet::AcceptedStream<T>,
     ) -> ClientHandler<T> {
-        let (tx, rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::channel(config.channel_limits.core);
         let (peer_addr, stream) = stream;
         ClientHandler {
             peer_addr,
-            transport: stnet::Transport::new(stream),
+            transport: stnet::Transport::new(config.timeouts.clone(), stream),
             token,
             active_tunnels,
             config,
@@ -164,7 +164,6 @@ where
 
     #[tracing::instrument(name = "Server", level = "info", skip_all)]
     pub async fn run(&mut self) -> Result<()> {
-        use std::time::Duration;
         use tokio::time;
 
         if let Err(e) = self.auth().await {
@@ -172,19 +171,19 @@ where
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
         };
         let handlers = self.make_tunnels().await?;
-        let mut heartbeat_interval = time::interval(Duration::from_secs(60));
+        let mut heartbeat_interval = time::interval(self.config.timeouts.heartbeat_interval);
         // SAFETY: The first .tick() resolves immediately. This ensures
         // that when the loop starts, the next time this interval ticks is
         // 60 seconds from now
         heartbeat_interval.tick().await;
         let mut last_recv_heartbeat =
-            std::time::Instant::now() + std::time::Duration::from_secs(60);
+            std::time::Instant::now() + self.config.timeouts.heartbeat_interval;
 
         let ret = loop {
             // XXX You MUST NOT return in this loop
             tokio::select! {
                 _maybe_interval = heartbeat_interval.tick() => {
-                    if last_recv_heartbeat.elapsed().as_secs() > 60 {
+                    if last_recv_heartbeat.elapsed() > 2*self.config.timeouts.heartbeat_interval {
                         error!("Missing heartbeat from client. Killing connection");
                         break Err(stnet::Error::ConnectionDead.into());
                     }
@@ -202,7 +201,7 @@ where
                         Some(data) => data,
                     };
                     match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
+                        self.config.timeouts.write,
                         self.transport.write_frame(rframe.into())
                     ).await {
                         Ok(Ok(_)) => (),
@@ -243,7 +242,9 @@ where
                             let id = r.id();
                             match self.get_tunnel_tx(*id) {
                                 None => error!(addr = ?id, "no channel for port. connection already killed?"),
-                                Some(tx) => tx.send(r).await?,
+                                Some(tx) => {
+                                    let _ = tx.send(r).await;
+                                },
                             }
                         }
 

@@ -1,8 +1,6 @@
 pub mod config;
 pub mod net;
 
-mod string;
-
 pub mod client;
 pub mod redirector;
 pub mod server;

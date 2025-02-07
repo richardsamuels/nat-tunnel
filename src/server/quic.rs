@@ -1,6 +1,7 @@
 use super::common::*;
 use crate::{config::server as config, net as stnet, Result};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
@@ -15,7 +16,7 @@ pub struct QuicServer {
 
 impl QuicServer {
     pub fn new(config: config::Config, token: CancellationToken) -> Result<Self> {
-        let tls_config = match config.crypto {
+        let mut server_config = match config.crypto {
             None => panic!("programmer error: missing cfg"),
             Some(ref crypto_paths) => {
                 let crypto = config::Crypto::from_crypto_cfg(crypto_paths)?;
@@ -23,7 +24,12 @@ impl QuicServer {
                 quinn::ServerConfig::with_single_cert(crypto.certs, crypto.key)?
             }
         };
-        let endpoint = quinn::Endpoint::server(tls_config, config.addr)?;
+
+        let mut tc = quinn::TransportConfig::default();
+        tc.max_idle_timeout(Some(Duration::from_secs(70).try_into().unwrap()));
+
+        server_config.transport_config(Arc::new(tc));
+        let endpoint = quinn::Endpoint::server(server_config, config.addr)?;
 
         Ok(QuicServer {
             server: endpoint,

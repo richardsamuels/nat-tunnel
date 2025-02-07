@@ -1,10 +1,10 @@
 use super::common::*;
 use crate::{net as stnet, redirector::Redirector, Result};
 use std::sync::{Arc, Mutex};
-use tokio::net as tnet;
 use tokio::sync::mpsc;
+use tokio::{net as tnet, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace};
+use tracing::{error, info};
 
 pub struct TunnelSupervisor {
     remote_port: u16,
@@ -12,6 +12,7 @@ pub struct TunnelSupervisor {
     token: CancellationToken,
     to_client: mpsc::Sender<stnet::RedirectorFrame>,
     tunnels: Arc<Mutex<TunnelChannels>>,
+    js: JoinSet<()>,
 }
 
 impl TunnelSupervisor {
@@ -28,19 +29,19 @@ impl TunnelSupervisor {
             token,
             tunnels,
             to_client,
+            js: JoinSet::new(),
         }
     }
 
-    #[tracing::instrument(name = "TunnelSupervisor", level = "info", skip_all)]
-    pub async fn run(&mut self) -> Result<()> {
-        // TODO support more protocols, including TCP+TLS/QUIC
-        let external_listener =
-            tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
+    async fn run2(&mut self, external_listener: tnet::TcpListener) -> Result<()> {
         loop {
             let (external_stream, external_addr) = tokio::select! {
                 maybe_accept = external_listener.accept() => match maybe_accept{
                     Err(e) => {
                         error!(cause = ?e, "failed to accept client");
+                        // This typically means an exhaustion of client ports
+                        // so give it a few seconds
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                         continue
                     }
                     Ok(s) => s,
@@ -63,26 +64,39 @@ impl TunnelSupervisor {
                 tunnels.insert(external_addr, to_tunnel);
             }
 
-            let port = self.remote_port;
-            let mtu = self.mtu;
-            let to_client = self.to_client.clone();
             let tunnels = self.tunnels.clone();
-            let token = self.token.clone();
-            tokio::spawn(async move {
-                let mut r = Redirector::with_stream(
-                    external_addr,
-                    port,
-                    mtu,
-                    token,
-                    external_stream,
-                    to_client,
-                    from_client,
-                );
+            let mut r = Redirector::with_stream(
+                external_addr,
+                self.remote_port,
+                self.mtu,
+                self.token.clone(),
+                external_stream,
+                self.to_client.clone(),
+                from_client,
+            );
+            let port = self.remote_port;
+            self.js.spawn(async move {
                 r.run().await;
                 let mut tunnels = tunnels.lock().unwrap();
                 tunnels.remove(&external_addr);
-                trace!(addr = ?external_addr, "Tunnel done");
+                info!(port = port, external_addr = ?external_addr, "connection closed");
             });
         }
+    }
+
+    #[tracing::instrument(name = "TunnelSupervisor", level = "info", skip_all)]
+    pub async fn run(&mut self) -> Result<()> {
+        // TODO support more protocols, including TCP+TLS/QUIC
+        let external_listener =
+            tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
+
+        let ret = self.run2(external_listener).await;
+
+        self.js.shutdown().await;
+        while self.js.join_next().await.is_some() {
+            // intentionally blank
+        }
+
+        ret
     }
 }
