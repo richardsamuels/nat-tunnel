@@ -7,9 +7,13 @@ pub fn default_core_channel() -> usize {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct Timeout {
+    #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: Duration,
+    #[serde(default = "default_write")]
     pub write: Duration,
+    #[serde(default = "default_tunnel_idle_timeout")]
     pub tunnel_idle: Duration,
+    #[serde(default = "default_auth_timeout")]
     pub auth: Duration,
 }
 
