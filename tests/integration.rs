@@ -100,7 +100,6 @@ cert = \"tests/server.crt.pem\"
 static MTX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 async fn wait_for_server_udp(addr: &SocketAddr) {
-    // TODO
     let mut tries = 5;
     loop {
         if tries == 0 {

@@ -27,10 +27,8 @@ cargo run --bin stc
 # pre-shared key that should match between Client/Server. Max of 512 bytes
 # Hint: generate this with LC_ALL=C tr -dc 'A-Za-z0-9!"#$%&'\''()*+,-./:;<=>?@[\]^_`{|}~' </dev/urandom | head -c 512; echo
 psk = "abcd"
-# the FQDN/IP of the Server
-addr = "127.0.0.1"
-# the port of the Server
-port = 12345
+# the FQDN/IP of the Server and its port
+addr = "127.0.0.1:12345"
 
 [crypto]
 ca = "ca.pem"
@@ -52,8 +50,8 @@ local_port = 8000
 ```toml
 # pre-shared key that should match between Client/Server. Max of 512 bytes
 psk = "abcd"
-# the port the Sever should listen on
-port = 12345
+# the address/port the Server should listen on
+addr = "0.0.0.0:12345"
 
 [crypto]
 key = "key.pem"
