@@ -24,6 +24,9 @@ async fn main() -> Result<()> {
     if c.crypto.is_none() && !args.allow_insecure_transport {
         panic!("Insecure transport in use without --allow-insecure-transport");
     }
+    if c.crypto.is_none() && matches!(c.transport, simple_tunnel::config::Transport::Quic) {
+        panic!("QUIC is enabled, but TLS cert/key file were not provided. Try setting `transport = \"tcp\"` or providing cert/key file");
+    }
 
     let token = CancellationToken::new();
 

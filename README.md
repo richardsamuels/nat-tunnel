@@ -22,6 +22,10 @@ cargo run --bin stc
 
 # Config
 
+*Warning* the default protocol is quic, which means you must provide a TLS cert
+and key. If you want to try it out without TLS, add field `transport = "tcp"`
+to both config files
+
 ## Client
 ```toml
 # pre-shared key that should match between Client/Server. Max of 512 bytes
