@@ -9,6 +9,8 @@ pub fn default_core_channel() -> usize {
 pub struct Timeout {
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: Duration,
+    #[serde(default = "default_quic_timeout")]
+    pub quic: Duration,
     #[serde(default = "default_write")]
     pub write: Duration,
     #[serde(default = "default_tunnel_idle_timeout")]
@@ -21,6 +23,7 @@ impl Default for Timeout {
     fn default() -> Self {
         Self {
             heartbeat_interval: default_heartbeat_interval(),
+            quic: default_quic_timeout(),
             tunnel_idle: default_tunnel_idle_timeout(),
             write: default_write_timeout(),
             auth: default_auth_timeout(),
@@ -30,6 +33,10 @@ impl Default for Timeout {
 
 fn default_write_timeout() -> Duration {
     std::time::Duration::from_secs(5)
+}
+
+fn default_quic_timeout() -> Duration {
+    Duration::from_secs_f64(default_heartbeat_interval().as_secs_f64() * 1.5)
 }
 
 fn default_heartbeat_interval() -> Duration {
@@ -51,6 +58,8 @@ pub enum Transport {
     Quic,
 }
 
+// TODO if i use a private struct, I can derive Serialize/Deserialize on that
+// and then this just performs validation
 impl<'de> Deserialize<'de> for Timeout {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -72,6 +81,7 @@ impl<'de> Deserialize<'de> for Timeout {
                 let mut heartbeat_interval = default_heartbeat_interval();
                 let mut tunnel_idle_timeout = default_tunnel_idle_timeout();
                 let mut write_timeout = default_write_timeout();
+                let mut quic = default_quic_timeout();
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -107,6 +117,18 @@ impl<'de> Deserialize<'de> for Timeout {
                                 duration
                             };
                         }
+                        "quic" => {
+                            let duration = Duration::from_secs(map.next_value::<u64>()?);
+                            quic = if duration > Duration::from_secs(120)
+                                || duration == Duration::from_secs(0)
+                            {
+                                return Err(serde::de::Error::custom(
+                                    "quic timeout should be in range (0, 120] seconds",
+                                ));
+                            } else {
+                                duration
+                            };
+                        }
                         // Auth deliberately omitted
                         _ => {
                             return Err(serde::de::Error::unknown_field(
@@ -117,15 +139,16 @@ impl<'de> Deserialize<'de> for Timeout {
                     }
                 }
 
-                if tunnel_idle_timeout < heartbeat_interval {
+                if quic < heartbeat_interval {
                     return Err(serde::de::Error::custom(format!(
-                        "tunnel_idle_timeout ({} secs) must be greater than or equal to heartbeat_interval ({} secs)",
+                        "quic ({} secs) must be greater than heartbeat_interval ({} secs). 1.5x is recommended",
                         tunnel_idle_timeout.as_secs(),
                         heartbeat_interval.as_secs()
                     )));
                 }
 
                 Ok(Timeout {
+                    quic,
                     heartbeat_interval,
                     write: write_timeout,
                     tunnel_idle: tunnel_idle_timeout,
@@ -137,7 +160,9 @@ impl<'de> Deserialize<'de> for Timeout {
         deserializer.deserialize_map(TimeoutVisitor)
     }
 }
+
 pub const PSK_MAX_LEN: usize = 512;
+
 pub fn de_psk<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,

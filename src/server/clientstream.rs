@@ -179,7 +179,7 @@ where
         let mut heartbeat_interval = time::interval(self.config.timeouts.heartbeat_interval);
         // SAFETY: The first .tick() resolves immediately. This ensures
         // that when the loop starts, the next time this interval ticks is
-        // 60 seconds from now
+        // heartbeat_interval seconds from now
         heartbeat_interval.tick().await;
         let mut last_recv_heartbeat =
             std::time::Instant::now() + self.config.timeouts.heartbeat_interval;

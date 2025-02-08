@@ -26,7 +26,7 @@ impl QuicServer {
         };
 
         let mut tc = quinn::TransportConfig::default();
-        tc.max_idle_timeout(Some(Duration::from_secs(70).try_into().unwrap()));
+        tc.max_idle_timeout(Some(config.timeouts.quic.try_into().unwrap()));
 
         server_config.transport_config(Arc::new(tc));
         let endpoint = quinn::Endpoint::server(server_config, config.addr)?;

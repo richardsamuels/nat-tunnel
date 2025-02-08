@@ -140,7 +140,7 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     info!("Handshaking with {} via QUIC", &c.addr);
 
     let mut tc = quinn::TransportConfig::default();
-    tc.max_idle_timeout(Some(c.timeouts.heartbeat_interval.try_into().unwrap()));
+    tc.max_idle_timeout(Some(c.timeouts.quic.try_into().unwrap()));
 
     let crypto_cfg = crypto_init2(&c.crypto.clone().expect("crypto is None"))?;
     let qcc = QuicClientConfig::try_from(crypto_cfg)?;

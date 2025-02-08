@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::{net as tnet, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 pub struct TunnelSupervisor {
     remote_port: u16,
@@ -79,7 +79,7 @@ impl TunnelSupervisor {
                 r.run().await;
                 let mut tunnels = tunnels.lock().unwrap();
                 tunnels.remove(&external_addr);
-                info!(port = port, external_addr = ?external_addr, "connection closed");
+                trace!(port = port, external_addr = ?external_addr, "connection closed");
             });
         }
     }
