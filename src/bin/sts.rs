@@ -18,6 +18,10 @@ struct Args {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     color_eyre::install()?;
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider
+        .install_default()
+        .expect("failed to install crypto provider");
     let args = Args::parse();
 
     let c = config::load_config(&args.config)?;

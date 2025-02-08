@@ -36,7 +36,12 @@ impl std::ops::DerefMut for ChildGuard {
     }
 }
 
-async fn setup(addr: &SocketAddr, transport: &str, skip_tls: bool) -> (PathBuf, PathBuf) {
+async fn setup(
+    addr: &SocketAddr,
+    transport: &str,
+    skip_tls: bool,
+    self_signed: bool,
+) -> (PathBuf, PathBuf) {
     let mut stc_cfg = format!(
         "
 psk = \"abcd\"
@@ -55,9 +60,21 @@ local_port = {}
         stc_cfg.push_str(
             "
 [crypto]
-ca = \"tests/ca.pem\"
 ",
         );
+        if self_signed {
+            stc_cfg.push_str(
+                "
+allow_self_signed = true
+",
+            );
+        } else {
+            stc_cfg.push_str(
+                "
+ca = \"tests/ca.pem\"
+",
+            );
+        }
     }
 
     let mut sts_cfg = format!(
@@ -141,8 +158,9 @@ async fn start_(
     addr: &SocketAddr,
     protocol: &str,
     allow_insecure: bool,
+    allow_self_signed: bool,
 ) -> (ChildGuard, ChildGuard) {
-    let (sts_path, stc_path) = setup(addr, protocol, allow_insecure).await;
+    let (sts_path, stc_path) = setup(addr, protocol, allow_insecure, allow_self_signed).await;
 
     let mut sts = test_bin::get_test_bin("sts");
     let sts_b = sts
@@ -190,7 +208,7 @@ async fn integration() {
     );
 
     let addr = server.addr();
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false).await;
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false, false).await;
 
     let url = server.url("/");
     let resp = reqwest::get(url.to_string()).await.unwrap();
@@ -219,7 +237,36 @@ async fn integration_quic() {
 
     let addr = server.addr();
 
-    let (mut sts_h, mut stc_h) = start_(&addr, "quic", false).await;
+    let (mut sts_h, mut stc_h) = start_(&addr, "quic", false, false).await;
+
+    let url = server.url("/");
+    let resp = reqwest::get(url.to_string()).await.unwrap();
+
+    // assert the response has a 200 status code.
+    assert!(resp.status().is_success());
+
+    match sts_h.try_wait() {
+        Ok(None) => (),
+        _ => panic!("sts dead"),
+    };
+
+    match stc_h.try_wait() {
+        Ok(None) => (),
+        _ => panic!("stc dead"),
+    };
+}
+
+#[tokio::test]
+async fn integration_quic_selfsigned() {
+    let _guard = MTX.lock();
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
+    );
+
+    let addr = server.addr();
+
+    let (mut sts_h, mut stc_h) = start_(&addr, "quic", false, true).await;
 
     let url = server.url("/");
     let resp = reqwest::get(url.to_string()).await.unwrap();
@@ -247,7 +294,7 @@ async fn integration_no_tls() {
     );
 
     let addr = server.addr();
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", true).await;
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", true, false).await;
 
     let url = server.url("/");
     let resp = reqwest::get(url.to_string()).await.unwrap();
@@ -271,7 +318,7 @@ async fn integration_client_failure() {
     // Client failure MUST NOT crash server
     let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
 
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false).await;
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false, false).await;
 
     stc_h.kill().unwrap();
     let _ = stc_h.wait().unwrap();
@@ -288,7 +335,7 @@ async fn integration_server_failure() {
     // Server failure MUST trigger client shutdown
     let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
 
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false).await;
+    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false, false).await;
 
     sts_h.kill().unwrap();
     let _ = stc_h.wait();

@@ -23,6 +23,10 @@ struct Args {
 async fn main() -> color_eyre::Result<()> {
     tracing_subscriber::fmt::init();
     color_eyre::install().unwrap();
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider
+        .install_default()
+        .expect("failed to install crypto provider");
     let args = Args::parse();
 
     let c = config::load_config(&args.config).expect("invalid config");
@@ -32,10 +36,9 @@ async fn main() -> color_eyre::Result<()> {
     if c.crypto.is_none() && matches!(c.transport, simple_tunnel::config::Transport::Quic) {
         panic!("QUIC is enabled, but TLS cert/key file were not provided. Try setting `transport = \"tcp\"` or providing cert/key file");
     }
-    let crypto_cfg = c
-        .crypto
-        .as_ref()
-        .map(|c| crypto_init(c).expect("failed to load cert files"));
+    let crypto_cfg = c.crypto.as_ref().map(|c| {
+        simple_tunnel::tls_self_signed::crypto_client_init(c).expect("failed to load cert files")
+    });
 
     let token = CancellationToken::new();
     let mut failures = 0;
@@ -142,7 +145,9 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     let mut tc = quinn::TransportConfig::default();
     tc.max_idle_timeout(Some(c.timeouts.heartbeat_interval.try_into().unwrap()));
 
-    let crypto_cfg = crypto_init2(&c.crypto.clone().expect("crypto is None"))?;
+    let crypto_cfg = simple_tunnel::tls_self_signed::crypto_client_init(
+        &c.crypto.clone().expect("crypto is None"),
+    )?;
     let qcc = QuicClientConfig::try_from(crypto_cfg)?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(qcc));
     client_config.transport_config(Arc::new(tc));
@@ -227,40 +232,4 @@ async fn run(
         let mut client = client::Client::new(c, token.clone(), peer_addr.into(), client_stream);
         client.run().await
     }
-}
-
-fn crypto_init(c: &config::CryptoConfig) -> Result<Arc<rustls::ClientConfig>> {
-    let crypto_cfg = config::Crypto::from_config(c)?;
-    let mut root_cert_store = rustls::RootCertStore::empty();
-    if !crypto_cfg.ca.is_empty() {
-        for cert in crypto_cfg.ca {
-            root_cert_store.add(cert).unwrap();
-        }
-    } else {
-        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
-
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_cert_store)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
-}
-
-// XXX: observe the type signature. This refers to quinn's embedded rustls impl
-// not the one used by this library. TODO fix this
-fn crypto_init2(c: &config::CryptoConfig) -> Result<Arc<quinn::rustls::ClientConfig>> {
-    let crypto_cfg = config::Crypto::from_config(c)?;
-    let mut root_cert_store = quinn::rustls::RootCertStore::empty();
-    if !crypto_cfg.ca.is_empty() {
-        for cert in crypto_cfg.ca {
-            root_cert_store.add(cert).unwrap();
-        }
-    } else {
-        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
-
-    let config = quinn::rustls::ClientConfig::builder()
-        .with_root_certificates(root_cert_store)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
 }
