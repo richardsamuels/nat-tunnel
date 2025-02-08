@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
                 ret = transport.run() => return ret,
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received SIGINT. Terminating all connections and shutting down...");
+                    let _ = transport.shutdown().await;
                 }
             };
         }
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
                 ret = transport.run() => return ret,
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received SIGINT. Terminating all connections and shutting down...");
+                    let _ = transport.shutdown().await;
                 }
             };
         }

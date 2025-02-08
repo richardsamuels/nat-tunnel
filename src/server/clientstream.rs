@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
@@ -43,6 +44,8 @@ where
     to_client: mpsc::Sender<stnet::RedirectorFrame>,
     from_tunnels: mpsc::Receiver<stnet::RedirectorFrame>,
     to_tunnels: Arc<Mutex<TunnelChannels>>,
+
+    js: JoinSet<u16>,
 }
 
 impl<T> ClientHandler<T>
@@ -58,6 +61,7 @@ where
         let (tx, rx) = mpsc::channel(config.channel_limits.core);
         let (peer_addr, stream) = stream;
         ClientHandler {
+            js: JoinSet::new(),
             peer_addr,
             transport: stnet::Transport::new(config.timeouts.clone(), stream),
             token,
@@ -132,7 +136,7 @@ where
         Ok(tunnels)
     }
 
-    async fn make_tunnels(&mut self) -> Result<HashMap<u16, tokio::task::JoinHandle<()>>> {
+    async fn make_tunnels(&mut self) -> Result<HashMap<u16, tokio::task::AbortHandle>> {
         let tunnels = self.validate_tunnels().await?;
 
         let mut tunnel_handlers: HashMap<u16, _> = HashMap::new();
@@ -143,13 +147,14 @@ where
             let port = *t;
             let mtu = self.config.as_ref().mtu;
             let token = self.token.clone();
-            let h = tokio::spawn(async move {
+            let h = self.js.spawn(async move {
                 trace!(port = ?port, "external listener start");
                 let mut h = super::TunnelSupervisor::new(port, mtu, token, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
                 trace!(port = ?port, "external listener end");
+                port
             });
             tunnel_handlers.insert(port, h);
             active_tunnels.insert(port);
@@ -257,6 +262,17 @@ where
                             error!(frame = ?f, "unexpected frame");
                         }
                     };
+                }
+
+                maybe_js = self.js.join_next() => {
+                    match maybe_js {
+                        None => break Ok(()), // TODO should this be error?
+                        Some(Err(e)) => break Err(e.into()),
+                        Some(Ok(port)) => {
+                            let mut g = self.active_tunnels.lock().unwrap();
+                            g.remove(&port);
+                        }
+                    }
                 }
 
                 _ = self.token.cancelled() => {
