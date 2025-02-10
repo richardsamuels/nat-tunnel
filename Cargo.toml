@@ -26,17 +26,19 @@ tokio = { version = "1.36.0", features = ["parking_lot", "rt-multi-thread", "io-
 tokio-util = { version = "0.7.10", features = ["codec"] }
 tokio-serde = { version = "0.9.0", features = ["messagepack"] }
 futures = "0.3.30"
-rustls = "0.22.2"
-tokio-rustls = "0.25.0"
 webpki-roots = "0.26.1"
 color-eyre = "0.6.2"
 snafu = "0.8.1"
 serde_bytes = "0.11.14"
-rustls-pki-types = { version = "1.11.0", features = ["std"] }
 argon2 = "0.5.3"
 socket2 = { version = "0.5.8", features = ["all"] }
 quinn = { version = "0.11.6", features = ["rustls-ring"] }
 quinn-proto = { version = "0.11.9", features = ["rustls-ring"] }
+rustls = "0.23.22"
+rustls-pki-types = "1.11.0"
+rustls-platform-verifier = "0.5.0"
+tokio-rustls = "0.26.1"
+itertools = "0.14.0"
 
 [dev-dependencies]
 httptest = "0.15.5"

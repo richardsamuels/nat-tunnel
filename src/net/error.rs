@@ -9,6 +9,15 @@ pub enum Error {
     ConnectionDead,
     #[snafu(display("connection refused"))]
     ConnectionRefused,
+    #[snafu(display("quinn connection error: {source}"))]
+    QuinnConnect {
+        source: quinn::ConnectError,
+        backtrace: snafu::Backtrace,
+    },
+    QuinnConnection {
+        source: quinn::ConnectionError,
+        backtrace: snafu::Backtrace,
+    },
     #[snafu(display("network io error"))]
     Io {
         message: String,

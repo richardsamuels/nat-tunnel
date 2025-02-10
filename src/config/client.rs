@@ -70,8 +70,11 @@ pub struct CryptoConfig {
 
     // Note: we defer parsing the certificate file because keys/certs can't
     // /shouldn't be moved around in memory
-    #[serde(deserialize_with = "de_ca_file")]
+    #[serde(default, deserialize_with = "de_ca_file")]
     pub ca: Option<PathBuf>,
+
+    #[serde(default)]
+    pub allow_self_signed: bool,
 }
 
 fn de_sni_name<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
@@ -113,6 +116,8 @@ pub struct Tunnel {
     #[serde(default = "localhost_ipv4")]
     pub local_hostname: String,
     pub local_port: u16,
+    #[serde(flatten, default, skip_serializing)]
+    pub crypto: Option<CryptoConfig>,
 }
 
 #[derive(Debug)]

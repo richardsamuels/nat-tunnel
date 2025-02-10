@@ -1,7 +1,9 @@
 pub mod config;
 pub mod net;
+pub mod tls_self_signed;
 
 pub mod client;
+pub mod race;
 pub mod redirector;
 pub mod server;
 

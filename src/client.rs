@@ -1,10 +1,12 @@
 use crate::net::reconnectable_err;
 use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector, Result};
+use rustls_pki_types::ServerName;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use tokio::net as tnet;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
@@ -138,26 +140,12 @@ where
         ret
     }
 
-    async fn new_conn(&mut self, id: SocketAddr, port: u16) -> Result<()> {
-        let tunnel_cfg = match self.config.tunnels.get(&port) {
-            None => {
-                unreachable!();
-            }
-            Some(p) => p,
-        };
-        let internal_addr: SocketAddr =
-            format!("{}:{}", tunnel_cfg.local_hostname, tunnel_cfg.local_port)
-                .parse()
-                .unwrap();
-        info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal");
-        let internal_stream = match tnet::TcpStream::connect(internal_addr).await {
-            Ok(s) => s,
-            Err(e) => {
-                error!(cause = ?e, addr = ?internal_addr, for_ = ?id, "Failed to connect to Internal");
-                return Err(e.into());
-            }
-        };
-
+    async fn new_redirector<U: stnet::Stream + 'static>(
+        &mut self,
+        id: SocketAddr,
+        port: u16,
+        internal_stream: U,
+    ) -> Result<()> {
         let to_server = self.to_server.clone();
         let token = self.token.clone();
         let mtu = self.config.mtu;
@@ -176,6 +164,29 @@ where
             r.run().await;
             id
         });
+        Ok(())
+    }
+
+    async fn new_conn(&mut self, id: SocketAddr, port: u16) -> Result<()> {
+        let tunnel_cfg = match self.config.tunnels.get(&port) {
+            None => unreachable!(),
+            Some(p) => p,
+        };
+        let internal_stream =
+            TcpStream::connect((tunnel_cfg.local_hostname.clone(), tunnel_cfg.local_port)).await?;
+        let internal_addr = internal_stream.peer_addr().unwrap();
+        if let Some(ref crypto_cfg) = tunnel_cfg.crypto {
+            info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal (TLS)");
+            let cc = crate::tls_self_signed::crypto_client_init(crypto_cfg)?;
+            let connector = TlsConnector::from(cc);
+            let dnsname = ServerName::try_from(tunnel_cfg.local_hostname.clone())?;
+            let tls_stream = connector.connect(dnsname, internal_stream).await?;
+            self.new_redirector(id, port, tls_stream).await?;
+        } else {
+            info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal");
+            self.new_redirector(id, port, internal_stream).await?;
+        };
+
         Ok(())
     }
 
