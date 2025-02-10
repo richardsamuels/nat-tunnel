@@ -15,7 +15,6 @@ pub type Framed<T> = tokio_serde::Framed<
     tokio_serde::formats::MessagePack<Frame, Frame>,
 >;
 
-/// Helper to create correct codecs
 fn frame<T>(stream: T) -> Framed<T>
 where
     T: Stream,
@@ -40,6 +39,7 @@ impl From<SocketAddr> for StreamId {
         StreamId::Basic(id)
     }
 }
+
 #[allow(type_alias_bounds)]
 pub type AcceptedStream<T: Stream> = (StreamId, T);
 
@@ -100,7 +100,7 @@ where
 
         let size = u16::from_be_bytes([magic[2], magic[3]]);
         if size as usize > crate::config::PSK_MAX_LEN {
-            tracing::error!("server sent key with invalid length {size}");
+            tracing::error!("received key with invalid length {size}");
             return Err(crate::net::error::UnexpectedFrameSnafu {}.build());
         }
 

@@ -102,7 +102,7 @@ where
                 return Err(ClientValidationError::IncorrectPSK);
             }
         }
-        let frame = stnet::Frame::Auth(key);
+        let frame = stnet::Frame::Auth(key.into());
         self.transport.write_frame(frame).await?;
         Ok(())
     }
@@ -174,6 +174,7 @@ where
         if let Err(e) = self.auth().await {
             error!(cause = ?e, "failed to authenticate client");
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
+            return Err(e.into());
         };
         let handlers = self.make_tunnels().await?;
         let mut heartbeat_interval = time::interval(self.config.timeouts.heartbeat_interval);
@@ -271,18 +272,23 @@ where
                         Some(Ok(port)) => {
                             let mut g = self.active_tunnels.lock().unwrap();
                             g.remove(&port);
+                            // This is probably an awful idea
+                            // We want the client to be forced to reconnect if any tunnel dies
+                            break Ok(());
                         }
                     }
                 }
 
                 _ = self.token.cancelled() => {
-                    self.transport.write_frame(stnet::Frame::Kthxbai).await?;
                     info!("Shutting down client connection");
                     break Ok(())
                 }
             }
         };
 
+        if let Err(e) = self.transport.write_frame(stnet::Frame::Kthxbai).await {
+            error!(e=?e, "failed to inform client of shutdown");
+        }
         {
             let mut active_tunnels = self.active_tunnels.lock().unwrap();
             trace!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
@@ -293,6 +299,7 @@ where
             let mut tunnels = self.to_tunnels.lock().unwrap();
             tunnels.clear();
         }
+        info!("ending stream");
         ret
     }
 }

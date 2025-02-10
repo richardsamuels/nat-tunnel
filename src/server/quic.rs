@@ -76,7 +76,7 @@ impl QuicServer {
 
             let mut h = QuicStream::new(
                 self.config.clone(),
-                self.token.clone(),
+                self.token.child_token(),
                 self.active_tunnels.clone(),
                 id,
                 conn,
