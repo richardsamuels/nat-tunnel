@@ -152,7 +152,6 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     let mut client_config = quinn::ClientConfig::new(Arc::new(qcc));
     client_config.transport_config(Arc::new(tc));
     let mut endpoint = quinn::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into())?;
-    //let mut endpoint = quinn::Endpoint::client((std::net::Ipv4Addr::UNSPECIFIED, 0).into())?;
     endpoint.set_default_client_config(client_config);
 
     let addrs: Vec<_> = c.addr.to_socket_addrs()?.collect();
