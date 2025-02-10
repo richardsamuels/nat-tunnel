@@ -104,38 +104,6 @@ fn why_do_i_have_to_impl_this(addr: &str) -> &str {
     }
 }
 
-async fn try_quic(
-    token: &CancellationToken,
-    endpoint: &quinn::Endpoint,
-    addrs: &Vec<std::net::SocketAddr>,
-    expected_host: &str,
-) -> Option<quinn::Connection> {
-    for addr in addrs {
-        let conn_ft = endpoint.connect(*addr, expected_host);
-        if conn_ft.is_err() {
-            continue;
-        };
-
-        tokio::select! {
-            result = tokio::time::timeout(std::time::Duration::from_secs(1), conn_ft.unwrap()) => {
-                match result {
-                    Ok(Ok(conn)) => return Some(conn),
-                    Ok(Err(e)) => {
-                        tracing::trace!(addr = ?addr, error = ?e, "error occurred while connecting");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::trace!(addr = ?addr, error = ?e, "timeout occurred while connecting");
-                        continue;
-                    }
-                }
-            }
-            _ = token.cancelled() => break
-        };
-    }
-    None
-}
-
 async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     use quinn_proto::crypto::rustls::QuicClientConfig;
     use std::net::ToSocketAddrs;
@@ -157,7 +125,7 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     let addrs: Vec<_> = c.addr.to_socket_addrs()?.collect();
     let expected_host = why_do_i_have_to_impl_this(&c.addr);
 
-    let conn = try_quic(&token, &endpoint, &addrs, expected_host).await;
+    let conn = simple_tunnel::race::quinn(token.clone(), &endpoint, &addrs, expected_host).await?;
     if conn.is_none() {
         error!(addrs=?addrs, "failed to connect to any resolved addresses");
         return Err(Error::ConnectionDead.into());

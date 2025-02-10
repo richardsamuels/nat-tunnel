@@ -3,7 +3,7 @@ use crate::{config::client as config, net as stnet, net::Frame, redirector::Redi
 use rustls_pki_types::ServerName;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsConnector;
@@ -172,23 +172,19 @@ where
             None => unreachable!(),
             Some(p) => p,
         };
-        let addrs: Vec<SocketAddr> = (tunnel_cfg.local_hostname.clone(), tunnel_cfg.local_port)
-            .to_socket_addrs()?
-            .collect();
-        let stream = crate::race::tcp(self.token.clone(), addrs, port)
-            .await?
-            .ok_or_else(|| stnet::ConnectionDeadSnafu {}.build())?;
-        let internal_addr = stream.peer_addr().unwrap();
+        let internal_stream =
+            TcpStream::connect((tunnel_cfg.local_hostname.clone(), tunnel_cfg.local_port)).await?;
+        let internal_addr = internal_stream.peer_addr().unwrap();
         if let Some(ref crypto_cfg) = tunnel_cfg.crypto {
             info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal (TLS)");
             let cc = crate::tls_self_signed::crypto_client_init(crypto_cfg)?;
             let connector = TlsConnector::from(cc);
             let dnsname = ServerName::try_from(tunnel_cfg.local_hostname.clone())?;
-            let tls_stream = connector.connect(dnsname, stream).await?;
+            let tls_stream = connector.connect(dnsname, internal_stream).await?;
             self.new_redirector(id, port, tls_stream).await?;
         } else {
             info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal");
-            self.new_redirector(id, port, stream).await?;
+            self.new_redirector(id, port, internal_stream).await?;
         };
 
         Ok(())

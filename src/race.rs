@@ -9,11 +9,12 @@ use tokio::time::{self, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace};
 
-pub async fn tcp(
+pub async fn quinn(
     token: CancellationToken,
-    addrs: Vec<SocketAddr>,
-    port: u16,
-) -> stnet::Result<Option<tokio::net::TcpStream>> {
+    endpoint: &quinn::Endpoint,
+    addrs: &Vec<SocketAddr>,
+    expected_host: &str,
+) -> stnet::Result<Option<quinn::Connection>> {
     let ipv6_addrs = addrs
         .iter()
         .filter(|addr| matches!(addr, SocketAddr::V6(_)))
@@ -28,8 +29,8 @@ pub async fn tcp(
             // race between ipv6 and ipv4 connections with ipv4 having a delayed start
             Both(v6, v4) => {
                 let mut futs = vec![
-                    try_tcp(v6, port).boxed(),
-                    with_delay(v4, port, try_tcp).boxed(),
+                    try_quinn(endpoint, v6, expected_host).boxed(),
+                    with_delay(endpoint, v4, expected_host, try_quinn).boxed(),
                 ];
                 let ret = loop {
                     tokio::select! {
@@ -62,10 +63,10 @@ pub async fn tcp(
                     _ = token.cancelled() => {
                         return Ok(None)
                     }
-                    maybe = try_tcp(x, port) => {
+                    maybe = try_quinn(endpoint, x, expected_host) => {
                         match maybe {
                             Err(e) => {
-                                error!(e=?e, addr=?x, port=port, "connection failed");
+                                error!(e=?e, addr=?x, "connection failed");
                                 continue
                             }
                             Ok(s) => s
@@ -81,29 +82,33 @@ pub async fn tcp(
     Ok(None)
 }
 
-async fn try_tcp(addr: &SocketAddr, port: u16) -> stnet::Result<tokio::net::TcpStream> {
-    trace!(addr=?addr, port=port, "trying connection via TCP");
-    let addr = SocketAddr::new(addr.ip(), port);
-    tokio::net::TcpStream::connect(addr)
+pub async fn try_quinn(
+    endpoint: &quinn::Endpoint,
+    addr: &SocketAddr,
+    expected_host: &str,
+) -> stnet::Result<quinn::Connection> {
+    trace!(addr=?addr, "trying to connect via QUIC");
+    endpoint
+        .connect(*addr, expected_host)
+        .with_context(|_| stnet::QuinnConnectSnafu {})?
         .await
-        .with_context(|_| stnet::IoSnafu {
-            message: format!("Failed to connect to {addr:?}"),
-        })
+        .with_context(|_| stnet::QuinnConnectionSnafu {})
 }
 
 async fn with_delay<'a, F, Fut>(
+    endpoint: &'a quinn::Endpoint,
     addr: &'a SocketAddr,
-    port: u16,
+    expected_host: &'a str,
     f: F,
-) -> stnet::Result<tokio::net::TcpStream>
+) -> stnet::Result<quinn::Connection>
 where
-    F: Fn(&'a SocketAddr, u16) -> Fut,
-    Fut: Future<Output = stnet::Result<tokio::net::TcpStream>>,
+    F: Fn(&'a quinn::Endpoint, &'a SocketAddr, &'a str) -> Fut,
+    Fut: Future<Output = stnet::Result<quinn::Connection>>,
 {
     let mut interval = time::interval_at(
         Instant::now() + Duration::from_millis(200),
         Duration::from_millis(200),
     );
     interval.tick().await;
-    f(&addr, port).await
+    f(endpoint, addr, expected_host).await
 }
