@@ -169,17 +169,16 @@ where
 
     async fn new_conn(&mut self, id: SocketAddr, port: u16) -> Result<()> {
         let tunnel_cfg = match self.config.tunnels.get(&port) {
-            None => {
-                unreachable!();
-            }
+            None => unreachable!(),
             Some(p) => p,
         };
         let addrs: Vec<SocketAddr> = (tunnel_cfg.local_hostname.clone(), tunnel_cfg.local_port)
             .to_socket_addrs()?
             .collect();
-        let (internal_addr, stream) = crate::race::tcp(self.token.clone(), addrs, port)
+        let stream = crate::race::tcp(self.token.clone(), addrs, port)
             .await?
             .ok_or_else(|| stnet::ConnectionDeadSnafu {}.build())?;
+        let internal_addr = stream.peer_addr().unwrap();
         if let Some(ref crypto_cfg) = tunnel_cfg.crypto {
             info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal (TLS)");
             let cc = crate::tls_self_signed::crypto_client_init(crypto_cfg)?;

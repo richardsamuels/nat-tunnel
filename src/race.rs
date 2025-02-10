@@ -13,7 +13,7 @@ pub async fn tcp(
     token: CancellationToken,
     addrs: Vec<SocketAddr>,
     port: u16,
-) -> stnet::Result<Option<(SocketAddr, tokio::net::TcpStream)>> {
+) -> stnet::Result<Option<tokio::net::TcpStream>> {
     let ipv6_addrs = addrs
         .iter()
         .filter(|addr| matches!(addr, SocketAddr::V6(_)))
@@ -23,9 +23,9 @@ pub async fn tcp(
         .filter(|addr| matches!(addr, SocketAddr::V4(_)))
         .peekable();
 
-    // race between ipv6 and ipv4 connections with ipv4 having a delayed start
     for elem in ipv6_addrs.zip_longest(ipv4_addrs) {
         let stream = match elem {
+            // race between ipv6 and ipv4 connections with ipv4 having a delayed start
             Both(v6, v4) => {
                 let mut futs = vec![
                     try_tcp(v6, port).boxed(),
@@ -56,6 +56,7 @@ pub async fn tcp(
                 }
                 ret.unwrap()
             }
+            // otherwise try the remaining ones one by one
             Left(x) | Right(x) => {
                 tokio::select! {
                     _ = token.cancelled() => {
@@ -74,8 +75,7 @@ pub async fn tcp(
             }
         };
 
-        // TODO
-        return Ok(Some((stream.peer_addr().unwrap(), stream)));
+        return Ok(Some(stream));
     }
 
     Ok(None)
