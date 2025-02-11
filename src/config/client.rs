@@ -116,7 +116,7 @@ pub struct Tunnel {
     #[serde(default = "localhost_ipv4")]
     pub local_hostname: String,
     pub local_port: u16,
-    #[serde(flatten, default, skip_serializing)]
+    #[serde(default = "Option::default", skip_serializing)]
     pub crypto: Option<CryptoConfig>,
 }
 

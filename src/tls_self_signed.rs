@@ -25,32 +25,46 @@ impl SelfSignedPkiVerifier {
 }
 
 impl ServerCertVerifier for SelfSignedPkiVerifier {
-    /// Will verify the certificate is valid in the following ways:
-    /// - Not Expired
-    /// - Valid for DNS entry
-    /// - Valid revocation status (if applicable).
-    ///
-    /// Depending on the verifier's configuration revocation status checking may be performed for
-    /// each certificate in the chain to a root CA (excluding the root itself), or only the
-    /// end entity certificate. Similarly, unknown revocation status may be treated as an error
-    /// or allowed based on configuration.
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
+        _intermediates: &[CertificateDer<'_>],
         server_name: &ServerName<'_>,
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        let cert = ParsedCertificate::try_from(end_entity)?;
+        use x509_parser::prelude::*;
 
-        self.verifier.verify_server_cert(
-            end_entity,
-            intermediates,
-            server_name,
-            ocsp_response,
-            now,
-        )?;
+        let (_, cert) = match X509Certificate::from_der(end_entity) {
+            Err(_) => {
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::BadEncoding,
+                ));
+            }
+            Ok(x) => x,
+        };
+        if cert.validity.not_before.timestamp() < 0
+            || (cert.validity.not_before.timestamp() as u64) > now.as_secs()
+        {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::NotValidYet,
+            ));
+        }
+        if cert.validity.not_after.timestamp() < 0
+            || (cert.validity.not_after.timestamp() as u64) < now.as_secs()
+        {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Expired,
+            ));
+        }
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        //self.verifier.verify_server_cert(
+        //    end_entity,
+        //    intermediates,
+        //    server_name,
+        //    ocsp_response,
+        //    now,
+        //)?;
 
         if !ocsp_response.is_empty() {
             trace!("Unvalidated OCSP response: {:?}", ocsp_response.to_vec());
