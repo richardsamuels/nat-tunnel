@@ -48,11 +48,6 @@ pub enum Error {
     RustPkiDnsName {
         source: rustls_pki_types::InvalidDnsNameError,
     },
-    #[snafu(display("{message}"))]
-    Other {
-        message: String,
-        backtrace: snafu::Backtrace,
-    },
 }
 
 impl From<rustls::Error> for Error {
