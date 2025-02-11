@@ -1,3 +1,6 @@
+#[cfg(not(unix))]
+compile_error!("Integration tests require a Unix-like platform");
+
 use httptest::{matchers::*, responders::*, Expectation, Server};
 use std::fs::File;
 use std::io::Write;
@@ -7,19 +10,25 @@ use std::process::Child;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 
+// std::process::Child is not killed on drop.
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         match self.0.kill() {
             Err(e) => println!("Could not kill child process: {}", e),
-            Ok(_) => println!("Successfully killed child process"),
+            Ok(_) => println!("Successfully killed child process: {}", self.id()),
         }
     }
 }
 impl AsRef<Child> for ChildGuard {
     fn as_ref(&self) -> &Child {
         &self.0
+    }
+}
+impl AsMut<Child> for ChildGuard {
+    fn as_mut(&mut self) -> &mut Child {
+        &mut self.0
     }
 }
 
@@ -36,8 +45,19 @@ impl std::ops::DerefMut for ChildGuard {
     }
 }
 
+fn sigint(child: &Child) {
+    // SAFETY: Without importing a thousand more crates, this is the way
+    // to send SIGINT. Obviously not cross compatible, but who cares about
+    // Windows?
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGINT);
+    }
+}
+
 async fn setup(
     addr: &SocketAddr,
+    server_port: u16,
+    tunnel_port: u16,
     transport: &str,
     skip_tls: bool,
     self_signed: bool,
@@ -45,12 +65,13 @@ async fn setup(
     let mut stc_cfg = format!(
         "
 psk = \"abcd\"
-addr = \"127.0.0.1:12000\"
+addr = \"127.0.0.1:{server_port}\"
 transport = \"{transport}\"
 
 
 [[tunnels]]
-remote_port = 10000
+remote_port = {tunnel_port}
+local_hostname = \"::1\"
 local_port = {}
 ",
         addr.port()
@@ -80,7 +101,7 @@ ca = \"tests/ca.pem\"
     let mut sts_cfg = format!(
         "
 psk = \"abcd\"
-addr = \"127.0.0.1:12000\"
+addr = \"127.0.0.1:{server_port}\"
 transport = \"{transport}\"
 "
     );
@@ -127,7 +148,7 @@ async fn wait_for_server_udp(addr: &SocketAddr) {
         }
         let udp_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
         if udp_socket.connect(addr).await.is_err() {
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(25)).await;
         } else {
             break;
         }
@@ -155,12 +176,26 @@ async fn wait_for_server(addr: &SocketAddr) {
 }
 
 async fn start_(
-    addr: &SocketAddr,
     protocol: &str,
     allow_insecure: bool,
     allow_self_signed: bool,
-) -> (ChildGuard, ChildGuard) {
-    let (sts_path, stc_path) = setup(addr, protocol, allow_insecure, allow_self_signed).await;
+) -> (ChildGuard, ChildGuard, httptest::Server, String) {
+    let server = Server::run();
+    let server_port = portpicker::pick_unused_port().expect("Failed to get random port");
+    let tunnel_port = portpicker::pick_unused_port().expect("Failed to get random port");
+    println!(
+        "Test using server port: {server_port}, tunnel port: {tunnel_port}, inner: {server}",
+        server = server.addr().port()
+    );
+    let (sts_path, stc_path) = setup(
+        &server.addr(),
+        server_port,
+        tunnel_port,
+        protocol,
+        allow_insecure,
+        allow_self_signed,
+    )
+    .await;
 
     let mut sts = test_bin::get_test_bin("sts");
     let sts_b = sts
@@ -175,12 +210,11 @@ async fn start_(
 
     let sts_h = ChildGuard(sts_b.spawn().unwrap());
 
-    // wait until we can connect to the server
-    let addr = "127.0.0.1:12000".parse().unwrap();
+    let server_addr = format!("127.0.0.1:{}", server_port).parse().unwrap();
     if protocol == "quic" {
-        wait_for_server_udp(&addr).await;
+        wait_for_server_udp(&server_addr).await;
     } else {
-        wait_for_server(&addr).await;
+        wait_for_server(&server_addr).await;
     }
 
     let mut stc = test_bin::get_test_bin("stc");
@@ -194,113 +228,123 @@ async fn start_(
     }
     let stc_h = ChildGuard(stc_b.spawn().unwrap());
 
-    (sts_h, stc_h)
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/uptimewaiter"))
+            .times(1..)
+            .respond_with(status_code(200)),
+    );
+
+    let uptime_url = format!("http://127.0.0.1:{}/uptimewaiter", tunnel_port)
+        .parse()
+        .unwrap();
+
+    let mut tries = 50;
+    while tries > 0 {
+        let g = get(&uptime_url).await;
+        tries -= 1;
+        if g.is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        }
+
+        if g.unwrap().status().is_success() {
+            break;
+        }
+    }
+    if tries == 0 {
+        panic!("Server never came up after 5 seconds");
+    }
+
+    let url = format!("http://127.0.0.1:{}/realpath", tunnel_port)
+        .parse()
+        .unwrap();
+
+    (sts_h, stc_h, server, url)
+}
+
+async fn get(url: &String) -> std::result::Result<reqwest::Response, reqwest::Error> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+    client.get(url).send().await
 }
 
 // XXX Hey, if it's 2026 or later and these tests are failing, it's because the
-// certificate in the tests folder has expired
+// certificate in the tests folder has expired. Use rcgen at that point
 #[tokio::test]
 async fn integration() {
     let _guard = MTX.lock();
-    let server = Server::run();
+
+    let (sts_h, stc_h, server, url) = start_("tcp", false, false).await;
     server.expect(
-        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
+        Expectation::matching(request::method_path("GET", "/realpath"))
+            .times(1)
+            .respond_with(status_code(200)),
     );
-
-    let addr = server.addr();
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false, false).await;
-
-    let url = server.url("/");
-    let resp = reqwest::get(url.to_string()).await.unwrap();
+    let resp = get(&url).await.unwrap();
 
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());
 
-    match sts_h.try_wait() {
-        Ok(None) => (),
-        _ => panic!("sts dead"),
-    };
-
-    match stc_h.try_wait() {
-        Ok(None) => (),
-        _ => panic!("stc dead"),
-    };
+    shutdown(stc_h, sts_h)
 }
 
 #[tokio::test]
 async fn integration_quic() {
     let _guard = MTX.lock();
-    let server = Server::run();
+
+    let (sts_h, stc_h, server, url) = start_("quic", false, false).await;
     server.expect(
-        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
+        Expectation::matching(request::method_path("GET", "/realpath"))
+            .respond_with(status_code(200)),
     );
 
-    let addr = server.addr();
-
-    let (mut sts_h, mut stc_h) = start_(&addr, "quic", false, false).await;
-
-    let url = server.url("/");
-    let resp = reqwest::get(url.to_string()).await.unwrap();
+    let resp = get(&url).await.unwrap();
 
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());
 
-    match sts_h.try_wait() {
-        Ok(None) => (),
-        _ => panic!("sts dead"),
-    };
-
-    match stc_h.try_wait() {
-        Ok(None) => (),
-        _ => panic!("stc dead"),
-    };
+    shutdown(stc_h, sts_h)
 }
 
 #[tokio::test]
 async fn integration_quic_selfsigned() {
     let _guard = MTX.lock();
-    let server = Server::run();
+
+    let (sts_h, stc_h, server, url) = start_("quic", false, true).await;
     server.expect(
-        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
+        Expectation::matching(request::method_path("GET", "/realpath"))
+            .respond_with(status_code(200)),
     );
 
-    let addr = server.addr();
-
-    let (mut sts_h, mut stc_h) = start_(&addr, "quic", false, true).await;
-
-    let url = server.url("/");
-    let resp = reqwest::get(url.to_string()).await.unwrap();
+    let resp = get(&url).await.unwrap();
 
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());
 
-    match sts_h.try_wait() {
-        Ok(None) => (),
-        _ => panic!("sts dead"),
-    };
-
-    match stc_h.try_wait() {
-        Ok(None) => (),
-        _ => panic!("stc dead"),
-    };
+    shutdown(stc_h, sts_h)
 }
 
 #[tokio::test]
 async fn integration_no_tls() {
     let _guard = MTX.lock();
-    let server = Server::run();
+
+    let (sts_h, stc_h, server, url) = start_("tcp", true, false).await;
     server.expect(
-        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
+        Expectation::matching(request::method_path("GET", "/realpath"))
+            .times(1)
+            .respond_with(status_code(200)),
     );
 
-    let addr = server.addr();
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", true, false).await;
-
-    let url = server.url("/");
-    let resp = reqwest::get(url.to_string()).await.unwrap();
+    let resp = get(&url).await.unwrap();
 
     assert!(resp.status().is_success());
 
+    shutdown(stc_h, sts_h)
+}
+
+fn shutdown(mut stc_h: ChildGuard, mut sts_h: ChildGuard) {
     match sts_h.try_wait() {
         Ok(None) => (),
         _ => panic!("sts dead"),
@@ -310,32 +354,35 @@ async fn integration_no_tls() {
         Ok(None) => (),
         _ => panic!("stc dead"),
     };
+
+    sigint(&stc_h);
+    let stc_res = stc_h.wait();
+    sigint(&sts_h);
+    let sts_res = sts_h.wait();
+    assert!(stc_res.unwrap().success());
+    assert!(sts_res.unwrap().success());
 }
 
 #[tokio::test]
 async fn integration_client_failure() {
     let _guard = MTX.lock();
     // Client failure MUST NOT crash server
-    let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
 
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false, false).await;
+    let (mut sts_h, mut stc_h, _, _) = start_("tcp", false, false).await;
 
     stc_h.kill().unwrap();
     let _ = stc_h.wait().unwrap();
 
-    match sts_h.try_wait() {
-        Ok(None) => (), // still running
-        _ => panic!("sts dead"),
-    };
+    sigint(&sts_h);
+    assert!(sts_h.wait().unwrap().success());
 }
 
 #[tokio::test]
 async fn integration_server_failure() {
     let _guard = MTX.lock();
     // Server failure MUST trigger client shutdown
-    let addr: SocketAddr = "127.0.0.1:20000".parse().unwrap();
 
-    let (mut sts_h, mut stc_h) = start_(&addr, "tcp", false, false).await;
+    let (mut sts_h, mut stc_h, _, _) = start_("tcp", false, false).await;
 
     sts_h.kill().unwrap();
     let _ = stc_h.wait();
@@ -344,4 +391,6 @@ async fn integration_server_failure() {
         Ok(Some(_)) => (),
         _ => panic!("stc still alive"),
     };
+    sigint(&stc_h);
+    assert_eq!(stc_h.wait().unwrap().code().unwrap(), 1);
 }

@@ -12,7 +12,7 @@ use tracing::{error, trace};
 pub async fn quinn(
     token: CancellationToken,
     endpoint: &quinn::Endpoint,
-    addrs: &Vec<SocketAddr>,
+    addrs: &[SocketAddr],
     expected_host: &str,
 ) -> stnet::Result<Option<quinn::Connection>> {
     let ipv6_addrs = addrs
