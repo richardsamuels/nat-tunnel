@@ -78,9 +78,6 @@ where
                 }
                 .build());
             }
-            Ok(Err(e)) if reconnectable_err(&e) => {
-                return Err(Error::ConnectionDead);
-            }
             Ok(Err(e)) => {
                 return Err(stnet::Error::Io {
                     message: "failed to read helo".to_string(),
@@ -118,9 +115,6 @@ where
                     context: "helo read",
                 }
                 .build());
-            }
-            Ok(Err(e)) if reconnectable_err(&e) => {
-                return Err(Error::ConnectionDead);
             }
             Ok(Err(e)) => {
                 return Err(stnet::Error::Io {
@@ -181,9 +175,6 @@ where
                     context: "frame write",
                 }
                 .build());
-            }
-            Ok(Err(e)) if reconnectable_err(&e) => {
-                return Err(Error::ConnectionDead);
             }
             Ok(Err(e)) => {
                 return Err(stnet::Error::Io {

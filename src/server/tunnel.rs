@@ -1,5 +1,6 @@
 use super::common::*;
-use crate::{net as stnet, redirector::Redirector, Result};
+use crate::{net as stnet, net::Result, redirector::Redirector};
+use snafu::ResultExt;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::{net as tnet, task::JoinSet};
@@ -51,12 +52,17 @@ impl TunnelSupervisor {
             };
 
             info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
-            self.to_client
+            if let Err(e) = self
+                .to_client
                 .send(stnet::RedirectorFrame::StartListener(
                     external_addr,
                     self.remote_port,
                 ))
-                .await?;
+                .await
+            {
+                error!(e=?e, "failed to send via channel");
+                break Err(stnet::Error::ConnectionDead);
+            }
 
             let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
             {
@@ -87,8 +93,11 @@ impl TunnelSupervisor {
     #[tracing::instrument(name = "TunnelSupervisor", level = "info", skip_all)]
     pub async fn run(&mut self) -> Result<()> {
         // TODO support more protocols, including TCP+TLS/QUIC
-        let external_listener =
-            tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
+        let external_listener = tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port))
+            .await
+            .with_context(|_| crate::net::IoSnafu {
+                message: "bind failed",
+            })?;
 
         let ret = self.run2(external_listener).await;
 

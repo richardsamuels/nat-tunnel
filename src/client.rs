@@ -1,8 +1,9 @@
-use crate::net::reconnectable_err;
-use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector, Result};
+use crate::{config::client as config, net as stnet, net::Frame, redirector::Redirector};
 use rustls_pki_types::ServerName;
+use snafu::ResultExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use stnet::Result;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
@@ -87,12 +88,7 @@ where
         let frame = match maybe_frame {
             Err(e) => {
                 error!(cause = ?e, "failed to read");
-                if let stnet::Error::Io { ref source, .. } = e {
-                    if reconnectable_err(source) {
-                        return Err(stnet::Error::ConnectionDead.into());
-                    }
-                }
-                return Err(e.into());
+                return Err(e);
             }
             Ok(s) => s,
         };
@@ -102,7 +98,7 @@ where
                 trace!("heartbeat received from server");
                 if let Err(e) = self.transport.write_frame(Frame::Heartbeat).await {
                     error!(e=?e, "failed to send heartbeat to server");
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
             Frame::Kthxbai => {
@@ -121,7 +117,7 @@ where
     }
 
     #[tracing::instrument(name = "Client", level = "debug", skip_all)]
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> stnet::Result<()> {
         self.push_tunnel_config().await?;
         let ret = loop {
             tokio::select! {
@@ -143,7 +139,7 @@ where
                     };
 
                     if let Err(e) = self.transport.write_frame(data.into()).await {
-                        break Err(e.into())
+                        break Err(e)
                     }
                 }
 
@@ -193,14 +189,23 @@ where
             Some(p) => p,
         };
         let internal_stream =
-            TcpStream::connect((tunnel_cfg.local_hostname.clone(), tunnel_cfg.local_port)).await?;
+            TcpStream::connect((tunnel_cfg.local_hostname.clone(), tunnel_cfg.local_port))
+                .await
+                .with_context(|_| crate::net::IoSnafu {
+                    message: "tunnel connection failed",
+                })?;
         let internal_addr = internal_stream.peer_addr().unwrap();
         if let Some(ref crypto_cfg) = tunnel_cfg.crypto {
             info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal (TLS)");
             let cc = crate::tls_self_signed::crypto_client_init(crypto_cfg)?;
             let connector = TlsConnector::from(cc);
             let dnsname = ServerName::try_from(tunnel_cfg.local_hostname.clone())?;
-            let tls_stream = connector.connect(dnsname, internal_stream).await?;
+            let tls_stream = connector
+                .connect(dnsname, internal_stream)
+                .await
+                .with_context(|_| crate::net::IoSnafu {
+                    message: "connect via tls failed",
+                })?;
             self.new_redirector(id, port, tls_stream).await?;
         } else {
             info!(internal_addr = ?internal_addr, for_ = ?id, "connecting to Internal");
@@ -236,7 +241,7 @@ where
                         // make sure the Server kills off the connection on its side
                         let d = stnet::RedirectorFrame::KillListener(id);
                         self.transport.write_frame(d.into()).await?;
-                        return Err(e.into());
+                        return Err(e);
                     }
                 }
             }

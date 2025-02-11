@@ -91,20 +91,6 @@ pub struct Datagram {
     pub data: Vec<u8>,
 }
 
-/// List of errors that imply the Client should try to reconnect to the Server
-pub(crate) fn reconnectable_err(err: &futures::io::Error) -> bool {
-    use futures::io::ErrorKind::*;
-
-    match err.kind() {
-        ConnectionReset|
-        //NetworkUnreachable|
-        ConnectionAborted|
-        //NetworkDown|
-        BrokenPipe => true,
-        _ => false
-    }
-}
-
 pub fn set_keepalive(stream: &std::net::TcpStream) -> std::io::Result<()> {
     use socket2::{Socket, TcpKeepalive};
     use std::os::fd::{AsRawFd, FromRawFd};

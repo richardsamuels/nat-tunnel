@@ -1,8 +1,9 @@
 use clap::Parser;
 use color_eyre::eyre::Report;
 use simple_tunnel::net::Error;
-use simple_tunnel::Result;
+use simple_tunnel::net::IoSnafu;
 use simple_tunnel::{client, config::client as config, net as stnet};
+use snafu::ResultExt;
 use std::process::exit;
 use std::sync::Arc;
 use tokio::net as tnet;
@@ -52,6 +53,11 @@ async fn main() -> color_eyre::Result<()> {
             .expect("failed to listen for event");
         info!("Received SIGINT, shutting down...");
         shutdown_token.cancel();
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for event");
+        info!("Received SIGINT twice, ungraceful shutdown initiated");
+        exit(1);
     });
 
     loop {
@@ -62,7 +68,7 @@ async fn main() -> color_eyre::Result<()> {
         };
         match ft {
             Ok(_) => exit(0),
-            Err(e) if matches!(e.downcast_ref(), Some(Error::ConnectionDead)) => {
+            Err(e) if e.reconnectable_err() => {
                 if token.is_cancelled() {
                     return Ok(());
                 }
@@ -73,13 +79,13 @@ async fn main() -> color_eyre::Result<()> {
                 failures += 1;
                 if failures >= 5 {
                     error!("client has failed 5 times in 5 seconds. Exiting");
-                    return Err(e);
+                    return Err(Report::from(e));
                 }
                 error!(cause = ?e, "client has failed. attempting recovery");
             }
             Err(e) => {
                 error!(cause = ?e, "client has failed with unrecoverable error");
-                return Err(e);
+                return Err(Report::from(e));
             }
         }
     }
@@ -104,7 +110,7 @@ fn why_do_i_have_to_impl_this(addr: &str) -> &str {
     }
 }
 
-async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
+async fn run_quic(c: config::Config, token: CancellationToken) -> simple_tunnel::net::Result<()> {
     use quinn_proto::crypto::rustls::QuicClientConfig;
     use std::net::ToSocketAddrs;
 
@@ -116,19 +122,28 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> Result<()> {
     let crypto_cfg = simple_tunnel::tls_self_signed::crypto_client_init(
         &c.crypto.clone().expect("crypto is None"),
     )?;
-    let qcc = QuicClientConfig::try_from(crypto_cfg)?;
+    let qcc = QuicClientConfig::try_from(crypto_cfg).expect("invalid crypto config");
     let mut client_config = quinn::ClientConfig::new(Arc::new(qcc));
     client_config.transport_config(Arc::new(tc));
-    let mut endpoint = quinn::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into())?;
+    let mut endpoint = quinn::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into())
+        .with_context(|_| IoSnafu {
+            message: "failed to create quinn endpoint",
+        })?;
     endpoint.set_default_client_config(client_config);
 
-    let addrs: Vec<_> = c.addr.to_socket_addrs()?.collect();
+    let addrs: Vec<_> = c
+        .addr
+        .to_socket_addrs()
+        .with_context(|_| IoSnafu {
+            message: format!("dns resolution failed for {}", c.addr),
+        })?
+        .collect();
     let expected_host = why_do_i_have_to_impl_this(&c.addr);
 
     let conn = simple_tunnel::race::quinn(token.clone(), &endpoint, &addrs, expected_host).await?;
     if conn.is_none() {
         error!(addrs=?addrs, "failed to connect to any resolved addresses");
-        return Err(Error::ConnectionDead.into());
+        return Err(Error::ConnectionDead);
     }
     let conn = conn.unwrap();
 
@@ -149,22 +164,18 @@ async fn run(
     c: config::Config,
     token: CancellationToken,
     crypto_cfg: &Option<Arc<rustls::ClientConfig>>,
-) -> Result<()> {
+) -> simple_tunnel::net::Result<()> {
     info!("Handshaking with {}", &c.addr);
     let client_stream = tokio::select! {
         result = tnet::TcpStream::connect(&c.addr) => {
-            match result {
-                Err(e) => {
-                    error!(cause = ?e, addr = ?c.addr, "failed to connect to Server");
-                    return Err(e.into());
-                }
-                Ok(s) => s,
-            }
+            result.with_context(|_| IoSnafu {
+                message: format!("failed to connect to server {addr:?}", addr=c.addr)
+            })?
         }
         _ = token.cancelled() => {
-            return Err(Report::from(simple_tunnel::net::IoTimeoutSnafu {
+            return Err(simple_tunnel::net::IoTimeoutSnafu {
                 context: "connection attempt cancelled",
-            }.build()));
+            }.build());
         }
     };
     let client_stream = client_stream
@@ -172,7 +183,9 @@ async fn run(
         .expect("failed to get std TcpStream");
     simple_tunnel::net::set_keepalive(&client_stream)
         .expect("keepalive should be enabled on stream, but operation failed");
-    let client_stream = tnet::TcpStream::from_std(client_stream)?;
+    let client_stream = tnet::TcpStream::from_std(client_stream).with_context(|_| IoSnafu {
+        message: "failed to convert stream to async",
+    })?;
 
     let peer_addr = client_stream.peer_addr().expect("ip");
 

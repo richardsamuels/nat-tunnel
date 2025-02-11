@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::config::Result;
 use rustls::pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;

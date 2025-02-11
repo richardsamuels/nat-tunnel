@@ -1,5 +1,5 @@
 use super::common::*;
-use crate::{config::server as config, net as stnet, Result};
+use crate::{config::server as config, net as stnet};
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
 #[derive(Snafu, Debug)]
-enum ClientValidationError {
+pub enum ClientValidationError {
     #[snafu(display(
         "client sent configuration with remote_ports {tunnels:?}, which are already in use"
     ))]
@@ -107,7 +107,7 @@ where
         Ok(())
     }
 
-    async fn validate_tunnels(&mut self) -> Result<Vec<u16>> {
+    async fn validate_tunnels(&mut self) -> crate::Result<Vec<u16>> {
         let tunnels = match self.transport.read_frame().await? {
             stnet::Frame::Tunnels(t) => t,
             _ => return Err(stnet::Error::UnexpectedFrame.into()),
@@ -136,7 +136,7 @@ where
         Ok(tunnels)
     }
 
-    async fn make_tunnels(&mut self) -> Result<HashMap<u16, tokio::task::AbortHandle>> {
+    async fn make_tunnels(&mut self) -> crate::Result<HashMap<u16, tokio::task::AbortHandle>> {
         let tunnels = self.validate_tunnels().await?;
 
         let mut tunnel_handlers: HashMap<u16, _> = HashMap::new();
@@ -168,7 +168,7 @@ where
     }
 
     #[tracing::instrument(name = "Server", level = "info", skip_all)]
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> crate::Result<()> {
         use tokio::time;
 
         if let Err(e) = self.auth().await {
@@ -184,6 +184,8 @@ where
         heartbeat_interval.tick().await;
         let mut last_recv_heartbeat =
             std::time::Instant::now() + self.config.timeouts.heartbeat_interval;
+
+        let mut inform_client = true;
 
         let ret = loop {
             // XXX You MUST NOT return in this loop
@@ -256,6 +258,7 @@ where
 
                         stnet::Frame::Kthxbai => {
                             info!("client will shutdown");
+                            inform_client = false;
                             break Ok(())
                         }
 
@@ -286,8 +289,10 @@ where
             }
         };
 
-        if let Err(e) = self.transport.write_frame(stnet::Frame::Kthxbai).await {
-            error!(e=?e, "failed to inform client of shutdown");
+        if inform_client {
+            if let Err(e) = self.transport.write_frame(stnet::Frame::Kthxbai).await {
+                error!(e=?e, "failed to inform client of shutdown");
+            }
         }
         {
             let mut active_tunnels = self.active_tunnels.lock().unwrap();
