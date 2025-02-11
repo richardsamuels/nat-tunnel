@@ -225,25 +225,46 @@ async fn start_(
     }
     let stc_h = ChildGuard(stc_b.spawn().unwrap());
 
-    let url = if allow_insecure {
-        format!("http://127.0.0.1:{}/realpath", tunnel_port)
-            .parse()
-            .unwrap()
-    } else {
-        format!("https://127.0.0.1:{}/realpath", tunnel_port)
-            .parse()
-            .unwrap()
-    };
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/uptimewaiter"))
+            .times(1..)
+            .respond_with(status_code(200)),
+    );
+
+    let uptime_url = format!("http://127.0.0.1:{}/uptimewaiter", tunnel_port)
+        .parse()
+        .unwrap();
+
+    let mut tries = 50;
+    while tries > 0 {
+        let g = get(&uptime_url).await;
+        tries -= 1;
+        if g.is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        }
+
+        if g.unwrap().status().is_success() {
+            break;
+        }
+    }
+    if tries == 0 {
+        panic!("Server never came up after 5 seconds");
+    }
+
+    let url = format!("http://127.0.0.1:{}/realpath", tunnel_port)
+        .parse()
+        .unwrap();
+
     (sts_h, stc_h, server, url)
 }
 
-async fn get(url: String) -> reqwest::Response {
+async fn get(url: &String) -> std::result::Result<reqwest::Response, reqwest::Error> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
         .unwrap();
-    client.get(url).send().await.unwrap()
+    client.get(url).send().await
 }
 
 // XXX Hey, if it's 2026 or later and these tests are failing, it's because the
@@ -259,7 +280,7 @@ async fn integration() {
             .times(1)
             .respond_with(status_code(200)),
     );
-    let resp = get(url).await;
+    let resp = get(&url).await.unwrap();
 
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());
@@ -268,51 +289,45 @@ async fn integration() {
     shutdown(stc_h, sts_h)
 }
 
-//#[tokio::test]
-//async fn integration_quic() {
-//    println!("Starting integration test with QUIC");
-//    let _guard = MTX.lock();
-//    let server = Server::run();
-//    server.expect(
-//        Expectation::matching(request::method_path("GET", "/realpath"))
-//            .respond_with(status_code(200)),
-//    );
-//
-//    let addr = server.addr();
-//
-//    let (sts_h, stc_h, url) = start_(&addr, "quic", false, false).await;
-//
-//    let resp = get(url).await;
-//
-//    // assert the response has a 200 status code.
-//    assert!(resp.status().is_success());
-//
-//    println!("Shutting down integration test with QUIC");
-//    shutdown(stc_h, sts_h)
-//}
+#[tokio::test]
+async fn integration_quic() {
+    println!("Starting integration test with QUIC");
+    let _guard = MTX.lock();
 
-//#[tokio::test]
-//async fn integration_quic_selfsigned() {
-//    println!("Starting integration test with QUIC and self-signed certificates");
-//    let _guard = MTX.lock();
-//    let server = Server::run();
-//    server.expect(
-//        Expectation::matching(request::method_path("GET", "/")).respond_with(status_code(200)),
-//    );
-//
-//    let addr = server.addr();
-//
-//    let (sts_h, stc_h) = start_(&addr, "quic", false, true).await;
-//
-//    let url = server.url("/");
-//    let resp = reqwest::get(url.to_string()).await.unwrap();
-//
-//    // assert the response has a 200 status code.
-//    assert!(resp.status().is_success());
-//
-//    println!("Shutting down integration test with QUIC and self-signed certificates");
-//    shutdown(stc_h, sts_h)
-//}
+    let (sts_h, stc_h, server, url) = start_("quic", false, false).await;
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/realpath"))
+            .respond_with(status_code(200)),
+    );
+
+    let resp = get(&url).await.unwrap();
+
+    // assert the response has a 200 status code.
+    assert!(resp.status().is_success());
+
+    println!("Shutting down integration test with QUIC");
+    shutdown(stc_h, sts_h)
+}
+
+#[tokio::test]
+async fn integration_quic_selfsigned() {
+    println!("Starting integration test with QUIC and self-signed certificates");
+    let _guard = MTX.lock();
+
+    let (sts_h, stc_h, server, url) = start_("quic", false, true).await;
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/realpath"))
+            .respond_with(status_code(200)),
+    );
+
+    let resp = get(&url).await.unwrap();
+
+    // assert the response has a 200 status code.
+    assert!(resp.status().is_success());
+
+    println!("Shutting down integration test with QUIC and self-signed certificates");
+    shutdown(stc_h, sts_h)
+}
 
 #[tokio::test]
 async fn integration_no_tls() {
@@ -327,7 +342,7 @@ async fn integration_no_tls() {
     );
     println!("{:?}", url);
 
-    let resp = get(url).await;
+    let resp = get(&url).await.unwrap();
 
     assert!(resp.status().is_success());
 
