@@ -1,12 +1,14 @@
 use super::common::*;
-use crate::{net as stnet, redirector::Redirector, Result};
+use crate::{net as stnet, net::Result, redirector::Redirector};
+use snafu::ResultExt;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::{net as tnet, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 pub struct TunnelSupervisor {
+    config: Arc<crate::config::server::Config>,
     remote_port: u16,
     mtu: u16,
     token: CancellationToken,
@@ -17,6 +19,7 @@ pub struct TunnelSupervisor {
 
 impl TunnelSupervisor {
     pub fn new(
+        config: Arc<crate::config::server::Config>,
         remote_port: u16,
         mtu: u16,
         token: CancellationToken,
@@ -24,6 +27,7 @@ impl TunnelSupervisor {
         to_client: mpsc::Sender<stnet::RedirectorFrame>,
     ) -> Self {
         TunnelSupervisor {
+            config,
             remote_port,
             mtu,
             token,
@@ -51,14 +55,20 @@ impl TunnelSupervisor {
             };
 
             info!(port = self.remote_port, external_addr = ?external_addr, "incoming connection");
-            self.to_client
+            if let Err(e) = self
+                .to_client
                 .send(stnet::RedirectorFrame::StartListener(
                     external_addr,
                     self.remote_port,
                 ))
-                .await?;
+                .await
+            {
+                error!(e=?e, "failed to send via channel");
+                break Err(stnet::Error::ConnectionDead);
+            }
 
-            let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
+            let (to_tunnel, from_client) =
+                mpsc::channel::<stnet::RedirectorFrame>(self.config.channel_limits.core);
             {
                 let mut tunnels = self.tunnels.lock().unwrap();
                 tunnels.insert(external_addr, to_tunnel);
@@ -79,7 +89,7 @@ impl TunnelSupervisor {
                 r.run().await;
                 let mut tunnels = tunnels.lock().unwrap();
                 tunnels.remove(&external_addr);
-                info!(port = port, external_addr = ?external_addr, "connection closed");
+                trace!(port = port, external_addr = ?external_addr, "connection closed");
             });
         }
     }
@@ -87,8 +97,11 @@ impl TunnelSupervisor {
     #[tracing::instrument(name = "TunnelSupervisor", level = "info", skip_all)]
     pub async fn run(&mut self) -> Result<()> {
         // TODO support more protocols, including TCP+TLS/QUIC
-        let external_listener =
-            tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port)).await?;
+        let external_listener = tnet::TcpListener::bind(format!("127.0.0.1:{}", self.remote_port))
+            .await
+            .with_context(|_| crate::net::IoSnafu {
+                message: "bind failed",
+            })?;
 
         let ret = self.run2(external_listener).await;
 

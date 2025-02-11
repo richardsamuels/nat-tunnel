@@ -378,11 +378,43 @@ async fn integration_client_failure() {
 }
 
 #[tokio::test]
+async fn integration_client_failure_quic() {
+    let _guard = MTX.lock();
+    // Client failure MUST NOT crash server
+
+    let (mut sts_h, mut stc_h, _, _) = start_("quic", false, true).await;
+
+    stc_h.kill().unwrap();
+    let _ = stc_h.wait().unwrap();
+
+    sigint(&sts_h);
+    assert!(sts_h.wait().unwrap().success());
+}
+
+#[tokio::test]
 async fn integration_server_failure() {
     let _guard = MTX.lock();
     // Server failure MUST trigger client shutdown
 
     let (mut sts_h, mut stc_h, _, _) = start_("tcp", false, false).await;
+
+    sts_h.kill().unwrap();
+    let _ = stc_h.wait();
+
+    match stc_h.try_wait() {
+        Ok(Some(_)) => (),
+        _ => panic!("stc still alive"),
+    };
+    sigint(&stc_h);
+    assert_eq!(stc_h.wait().unwrap().code().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn integration_server_failure_quic() {
+    let _guard = MTX.lock();
+    // Server failure MUST trigger client shutdown
+
+    let (mut sts_h, mut stc_h, _, _) = start_("quic", false, true).await;
 
     sts_h.kill().unwrap();
     let _ = stc_h.wait();

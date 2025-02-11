@@ -1,5 +1,4 @@
-use crate::config::Result as CResult;
-use crate::Result;
+use crate::config::Result;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use std::fs::read_to_string;
@@ -63,7 +62,7 @@ where
     Ok(value)
 }
 
-pub fn load_config(config: &Path) -> CResult<Config> {
+pub fn load_config(config: &Path) -> Result<Config> {
     let config_contents = read_to_string(config).with_context(|_| crate::config::IoSnafu {
         message: format!("failed to read config file '{:?}'", config),
     })?;
@@ -116,11 +115,14 @@ pub struct Crypto {
 }
 
 impl Crypto {
-    pub fn from_crypto_cfg(cfg: &CryptoConfig) -> Result<Crypto> {
+    pub fn from_crypto_cfg(cfg: &CryptoConfig) -> crate::Result<Crypto> {
         Self::new(&cfg.key, &cfg.cert)
     }
 
-    fn new<P: AsRef<Path>, Q: AsRef<Path> + std::fmt::Debug>(key: P, cert: Q) -> Result<Crypto> {
+    fn new<P: AsRef<Path>, Q: AsRef<Path> + std::fmt::Debug>(
+        key: P,
+        cert: Q,
+    ) -> crate::Result<Crypto> {
         use rustls_pki_types::{pem::PemObject, CertificateDer};
 
         let certs: Vec<_> = CertificateDer::pem_file_iter(&cert)

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::ops::{Deref, DerefMut};
 use std::vec::Vec;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -28,13 +29,43 @@ impl std::convert::From<Datagram> for RedirectorFrame {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Frame {
-    Auth(Vec<u8>),
+    Auth(AuthKey),
     Tunnels(Vec<u16>),
     ListenerStart(SocketAddr),
     Redirector(RedirectorFrame),
     ListenerEnd(SocketAddr),
     Kthxbai,
     Heartbeat,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct AuthKey(Vec<u8>);
+
+// custom impl because we must not leak auth key
+impl std::fmt::Debug for AuthKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthKey").finish()
+    }
+}
+
+impl DerefMut for AuthKey {
+    fn deref_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.0
+    }
+}
+
+impl Deref for AuthKey {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Vec<u8> {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for AuthKey {
+    fn from(item: Vec<u8>) -> Self {
+        AuthKey(item)
+    }
 }
 
 impl std::convert::From<Datagram> for Frame {
@@ -58,20 +89,6 @@ pub struct Datagram {
     pub port: u16, // 16
     #[serde(rename = "d", with = "serde_bytes")]
     pub data: Vec<u8>,
-}
-
-/// List of errors that imply the Client should try to reconnect to the Server
-pub(crate) fn reconnectable_err(err: &futures::io::Error) -> bool {
-    use futures::io::ErrorKind::*;
-
-    match err.kind() {
-        ConnectionReset|
-        //NetworkUnreachable|
-        ConnectionAborted|
-        //NetworkDown|
-        BrokenPipe => true,
-        _ => false
-    }
 }
 
 pub fn set_keepalive(stream: &std::net::TcpStream) -> std::io::Result<()> {

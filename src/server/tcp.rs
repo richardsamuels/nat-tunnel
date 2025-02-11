@@ -1,5 +1,6 @@
 use super::common::*;
-use crate::{config::server as config, Result};
+use crate::{config::server as config, net::Result};
+use snafu::ResultExt;
 use std::sync::{Arc, Mutex};
 use tokio::net as tnet;
 use tokio::task::JoinSet;
@@ -22,7 +23,7 @@ impl TcpServer {
         config: config::Config,
         token: CancellationToken,
         listener: tnet::TcpListener,
-    ) -> Result<Self> {
+    ) -> crate::Result<Self> {
         let acceptor = match config.crypto {
             None => None,
             Some(ref crypto_paths) => {
@@ -31,7 +32,10 @@ impl TcpServer {
                 let tls_config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
                     .with_single_cert(crypto.certs, crypto.key)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
+                    .with_context(|_| crate::net::IoSnafu {
+                        message: "failed to load certificate/key",
+                    })?;
                 Some(TlsAcceptor::from(Arc::new(tls_config)))
             }
         };

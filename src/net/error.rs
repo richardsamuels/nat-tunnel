@@ -41,9 +41,58 @@ pub enum Error {
     },
     #[snafu(display("received unexpected frame"))]
     UnexpectedFrame,
-    #[snafu(display("{message}"))]
-    Other {
-        message: String,
-        backtrace: snafu::Backtrace,
+    Rustls {
+        source: rustls::Error,
     },
+    #[snafu(display("{source}"))]
+    RustPkiDnsName {
+        source: rustls_pki_types::InvalidDnsNameError,
+    },
+}
+
+impl From<rustls::Error> for Error {
+    fn from(source: rustls::Error) -> Self {
+        Error::Rustls { source }
+    }
+}
+
+impl From<quinn::ConnectionError> for Error {
+    fn from(source: quinn::ConnectionError) -> Self {
+        Error::QuinnConnection {
+            source,
+            backtrace: snafu::Backtrace::capture(),
+        }
+    }
+}
+
+impl From<rustls_pki_types::InvalidDnsNameError> for Error {
+    fn from(source: rustls_pki_types::InvalidDnsNameError) -> Self {
+        Error::RustPkiDnsName { source }
+    }
+}
+
+impl Error {
+    pub fn reconnectable_err(&self) -> bool {
+        use Error::*;
+        match self {
+            Io { source, .. } => {
+                use futures::io::ErrorKind::*;
+                #[allow(clippy::match_like_matches_macro)]
+                match source.kind() {
+                    ConnectionReset | NetworkUnreachable | ConnectionAborted | NetworkDown
+                    | BrokenPipe => true,
+                    _ => false,
+                }
+            }
+            QuinnConnection { source, .. } => {
+                use quinn::ConnectionError::*;
+                #[allow(clippy::match_like_matches_macro)]
+                match source {
+                    Reset | TimedOut => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
 }

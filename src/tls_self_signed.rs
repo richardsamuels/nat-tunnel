@@ -99,8 +99,8 @@ impl ServerCertVerifier for SelfSignedPkiVerifier {
 
 pub fn crypto_client_init(
     c: &crate::config::client::CryptoConfig,
-) -> crate::Result<Arc<rustls::ClientConfig>> {
-    let crypto_cfg = crate::config::client::Crypto::from_config(c)?;
+) -> crate::net::Result<Arc<rustls::ClientConfig>> {
+    let crypto_cfg = crate::config::client::Crypto::from_config(c).expect("invalid crypto config");
     let config: Arc<_> = if c.ca.is_some() {
         let mut root_cert_store = rustls::RootCertStore::empty();
 
@@ -115,7 +115,9 @@ pub fn crypto_client_init(
     } else if c.allow_self_signed {
         let mut root_cert_store = rustls::RootCertStore::empty();
         root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let b = rustls::client::WebPkiServerVerifier::builder(root_cert_store.into()).build()?;
+        let b = rustls::client::WebPkiServerVerifier::builder(root_cert_store.into())
+            .build()
+            .expect("valid root certs store");
         let verifier = SelfSignedPkiVerifier::new(b);
         rustls::ClientConfig::builder()
             .dangerous()

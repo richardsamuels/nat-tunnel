@@ -1,12 +1,10 @@
-pub mod config;
-pub mod net;
-pub mod tls_self_signed;
-
 pub mod client;
+pub mod config;
+pub mod error;
+pub mod net;
 pub mod race;
 pub mod redirector;
 pub mod server;
+pub mod tls_self_signed;
 
-//pub(crate) type StdResult<T, U> = std::result::Result<T, U>;
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T> = color_eyre::eyre::Result<T>;
+pub use error::{Error, Result};

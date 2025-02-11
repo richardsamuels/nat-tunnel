@@ -1,6 +1,8 @@
 use clap::Parser;
-use color_eyre::eyre::Result;
-use simple_tunnel::{config::server as config, server};
+use color_eyre::eyre::{Report, Result as CEResult};
+use simple_tunnel::{config::server as config, net::IoSnafu, server};
+use snafu::ResultExt;
+use std::process::exit;
 use tokio::net as tnet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -15,7 +17,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> CEResult<()> {
     tracing_subscriber::fmt::init();
     color_eyre::install()?;
     let provider = rustls::crypto::aws_lc_rs::default_provider();
@@ -34,30 +36,36 @@ async fn main() -> Result<()> {
 
     let token = CancellationToken::new();
 
+    let shutdown_token = token.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for event");
+        info!("Received SIGINT. Terminating all connections and shutting down...");
+        shutdown_token.cancel();
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for event");
+        info!("Received SIGINT twice, ungraceful shutdown initiated");
+        exit(1);
+    });
+
     // TODO wow lazy
     use simple_tunnel::config::Transport;
     match c.transport {
         Transport::Tcp => {
-            let listener = tnet::TcpListener::bind(c.addr).await?;
+            let listener = tnet::TcpListener::bind(c.addr)
+                .await
+                .with_context(|_| IoSnafu {
+                    message: format!("failed to bind {}", c.addr),
+                })?;
             let mut transport = server::TcpServer::new(c, token.clone(), listener).unwrap();
 
-            tokio::select! {
-                ret = transport.run() => return ret,
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received SIGINT. Terminating all connections and shutting down...");
-                }
-            };
+            transport.run().await.map_err(Report::from)
         }
         Transport::Quic => {
             let mut transport = server::QuicServer::new(c, token.clone()).unwrap();
-            tokio::select! {
-                ret = transport.run() => return ret,
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received SIGINT. Terminating all connections and shutting down...");
-                }
-            };
+            transport.run().await.map_err(Report::from)
         }
-    };
-
-    Ok(())
+    }
 }

@@ -1,15 +1,16 @@
 use super::common::*;
-use crate::{config::server as config, net as stnet, Result};
+use crate::{config::server as config, net as stnet};
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
 #[derive(Snafu, Debug)]
-enum ClientValidationError {
+pub enum ClientValidationError {
     #[snafu(display(
         "client sent configuration with remote_ports {tunnels:?}, which are already in use"
     ))]
@@ -43,6 +44,8 @@ where
     to_client: mpsc::Sender<stnet::RedirectorFrame>,
     from_tunnels: mpsc::Receiver<stnet::RedirectorFrame>,
     to_tunnels: Arc<Mutex<TunnelChannels>>,
+
+    js: JoinSet<u16>,
 }
 
 impl<T> ClientHandler<T>
@@ -58,6 +61,7 @@ where
         let (tx, rx) = mpsc::channel(config.channel_limits.core);
         let (peer_addr, stream) = stream;
         ClientHandler {
+            js: JoinSet::new(),
             peer_addr,
             transport: stnet::Transport::new(config.timeouts.clone(), stream),
             token,
@@ -98,12 +102,12 @@ where
                 return Err(ClientValidationError::IncorrectPSK);
             }
         }
-        let frame = stnet::Frame::Auth(key);
+        let frame = stnet::Frame::Auth(key.into());
         self.transport.write_frame(frame).await?;
         Ok(())
     }
 
-    async fn validate_tunnels(&mut self) -> Result<Vec<u16>> {
+    async fn validate_tunnels(&mut self) -> crate::Result<Vec<u16>> {
         let tunnels = match self.transport.read_frame().await? {
             stnet::Frame::Tunnels(t) => t,
             _ => return Err(stnet::Error::UnexpectedFrame.into()),
@@ -132,7 +136,7 @@ where
         Ok(tunnels)
     }
 
-    async fn make_tunnels(&mut self) -> Result<HashMap<u16, tokio::task::JoinHandle<()>>> {
+    async fn make_tunnels(&mut self) -> crate::Result<HashMap<u16, tokio::task::AbortHandle>> {
         let tunnels = self.validate_tunnels().await?;
 
         let mut tunnel_handlers: HashMap<u16, _> = HashMap::new();
@@ -143,13 +147,16 @@ where
             let port = *t;
             let mtu = self.config.as_ref().mtu;
             let token = self.token.clone();
-            let h = tokio::spawn(async move {
+            let cfg = self.config.clone();
+            let h = self.js.spawn(async move {
                 trace!(port = ?port, "external listener start");
-                let mut h = super::TunnelSupervisor::new(port, mtu, token, to_tunnels, to_client);
+                let mut h =
+                    super::TunnelSupervisor::new(cfg, port, mtu, token, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
                 trace!(port = ?port, "external listener end");
+                port
             });
             tunnel_handlers.insert(port, h);
             active_tunnels.insert(port);
@@ -163,26 +170,30 @@ where
     }
 
     #[tracing::instrument(name = "Server", level = "info", skip_all)]
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> crate::Result<()> {
         use tokio::time;
 
         if let Err(e) = self.auth().await {
             error!(cause = ?e, "failed to authenticate client");
             self.transport.write_frame(stnet::Frame::Kthxbai).await?;
+            return Err(e.into());
         };
         let handlers = self.make_tunnels().await?;
         let mut heartbeat_interval = time::interval(self.config.timeouts.heartbeat_interval);
         // SAFETY: The first .tick() resolves immediately. This ensures
         // that when the loop starts, the next time this interval ticks is
-        // 60 seconds from now
+        // heartbeat_interval seconds from now
         heartbeat_interval.tick().await;
         let mut last_recv_heartbeat =
             std::time::Instant::now() + self.config.timeouts.heartbeat_interval;
+
+        let mut inform_client = true;
 
         let ret = loop {
             // XXX You MUST NOT return in this loop
             tokio::select! {
                 _maybe_interval = heartbeat_interval.tick() => {
+                    info!("Channel backpressure: from_tunnels: {}/{}", self.from_tunnels.len(), self.config.channel_limits.core);
                     if last_recv_heartbeat.elapsed() > 2*self.config.timeouts.heartbeat_interval {
                         error!("Missing heartbeat from client. Killing connection");
                         break Err(stnet::Error::ConnectionDead.into());
@@ -250,6 +261,7 @@ where
 
                         stnet::Frame::Kthxbai => {
                             info!("client will shutdown");
+                            inform_client = false;
                             break Ok(())
                         }
 
@@ -259,14 +271,32 @@ where
                     };
                 }
 
+                maybe_js = self.js.join_next() => {
+                    match maybe_js {
+                        None => break Ok(()), // TODO should this be error?
+                        Some(Err(e)) => break Err(e.into()),
+                        Some(Ok(port)) => {
+                            let mut g = self.active_tunnels.lock().unwrap();
+                            g.remove(&port);
+                            // This is probably an awful idea
+                            // We want the client to be forced to reconnect if any tunnel dies
+                            break Ok(());
+                        }
+                    }
+                }
+
                 _ = self.token.cancelled() => {
-                    self.transport.write_frame(stnet::Frame::Kthxbai).await?;
                     info!("Shutting down client connection");
                     break Ok(())
                 }
             }
         };
 
+        if inform_client {
+            if let Err(e) = self.transport.write_frame(stnet::Frame::Kthxbai).await {
+                error!(e=?e, "failed to inform client of shutdown");
+            }
+        }
         {
             let mut active_tunnels = self.active_tunnels.lock().unwrap();
             trace!(tunnels = ?active_tunnels.iter(), "cleaning up tunnels");
@@ -277,6 +307,7 @@ where
             let mut tunnels = self.to_tunnels.lock().unwrap();
             tunnels.clear();
         }
+        info!("ending stream");
         ret
     }
 }
