@@ -148,7 +148,7 @@ async fn wait_for_server_udp(addr: &SocketAddr) {
         }
         let udp_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
         if udp_socket.connect(addr).await.is_err() {
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(25)).await;
         } else {
             break;
         }
