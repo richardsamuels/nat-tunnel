@@ -1,3 +1,6 @@
+#[cfg(not(unix))]
+compile_error!("Integration tests require a Unix-like platform");
+
 use httptest::{matchers::*, responders::*, Expectation, Server};
 use std::fs::File;
 use std::io::Write;
@@ -271,7 +274,6 @@ async fn get(url: &String) -> std::result::Result<reqwest::Response, reqwest::Er
 // certificate in the tests folder has expired. Use rcgen at that point
 #[tokio::test]
 async fn integration() {
-    println!("Starting integration test with TCP");
     let _guard = MTX.lock();
 
     let (sts_h, stc_h, server, url) = start_("tcp", false, false).await;
@@ -285,13 +287,11 @@ async fn integration() {
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());
 
-    println!("Shutting down integration test with TCP");
     shutdown(stc_h, sts_h)
 }
 
 #[tokio::test]
 async fn integration_quic() {
-    println!("Starting integration test with QUIC");
     let _guard = MTX.lock();
 
     let (sts_h, stc_h, server, url) = start_("quic", false, false).await;
@@ -305,13 +305,11 @@ async fn integration_quic() {
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());
 
-    println!("Shutting down integration test with QUIC");
     shutdown(stc_h, sts_h)
 }
 
 #[tokio::test]
 async fn integration_quic_selfsigned() {
-    println!("Starting integration test with QUIC and self-signed certificates");
     let _guard = MTX.lock();
 
     let (sts_h, stc_h, server, url) = start_("quic", false, true).await;
@@ -325,13 +323,11 @@ async fn integration_quic_selfsigned() {
     // assert the response has a 200 status code.
     assert!(resp.status().is_success());
 
-    println!("Shutting down integration test with QUIC and self-signed certificates");
     shutdown(stc_h, sts_h)
 }
 
 #[tokio::test]
 async fn integration_no_tls() {
-    println!("Starting integration test with no TLS");
     let _guard = MTX.lock();
 
     let (sts_h, stc_h, server, url) = start_("tcp", true, false).await;
@@ -340,13 +336,11 @@ async fn integration_no_tls() {
             .times(1)
             .respond_with(status_code(200)),
     );
-    println!("{:?}", url);
 
     let resp = get(&url).await.unwrap();
 
     assert!(resp.status().is_success());
 
-    println!("Shutting down integration test with no TLS");
     shutdown(stc_h, sts_h)
 }
 
