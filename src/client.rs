@@ -52,7 +52,7 @@ where
 
         let frame = self.transport.read_frame().await?;
         let stnet::Frame::Auth(_) = frame else {
-            return Err(stnet::Error::ConnectionRefused.into());
+            return Err(stnet::Error::ConnectionRefused);
         };
 
         let tunnels = self.config.tunnels.keys().copied().collect();
@@ -60,7 +60,7 @@ where
 
         let frame = self.transport.read_frame().await?;
         let stnet::Frame::Tunnels(_) = frame else {
-            return Err(stnet::Error::ConnectionRefused.into());
+            return Err(stnet::Error::ConnectionRefused);
         };
         trace!("Pushed tunnel config to remote");
         Ok(())

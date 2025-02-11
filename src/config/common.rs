@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub fn default_core_channel() -> usize {
-    128
+    256
 }
 
 #[derive(Debug, Serialize, Clone)]

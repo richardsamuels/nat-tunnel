@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
 pub struct TunnelSupervisor {
+    config: Arc<crate::config::server::Config>,
     remote_port: u16,
     mtu: u16,
     token: CancellationToken,
@@ -18,6 +19,7 @@ pub struct TunnelSupervisor {
 
 impl TunnelSupervisor {
     pub fn new(
+        config: Arc<crate::config::server::Config>,
         remote_port: u16,
         mtu: u16,
         token: CancellationToken,
@@ -25,6 +27,7 @@ impl TunnelSupervisor {
         to_client: mpsc::Sender<stnet::RedirectorFrame>,
     ) -> Self {
         TunnelSupervisor {
+            config,
             remote_port,
             mtu,
             token,
@@ -64,7 +67,8 @@ impl TunnelSupervisor {
                 break Err(stnet::Error::ConnectionDead);
             }
 
-            let (to_tunnel, from_client) = mpsc::channel::<stnet::RedirectorFrame>(32);
+            let (to_tunnel, from_client) =
+                mpsc::channel::<stnet::RedirectorFrame>(self.config.channel_limits.core);
             {
                 let mut tunnels = self.tunnels.lock().unwrap();
                 tunnels.insert(external_addr, to_tunnel);

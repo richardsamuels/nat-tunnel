@@ -147,9 +147,11 @@ where
             let port = *t;
             let mtu = self.config.as_ref().mtu;
             let token = self.token.clone();
+            let cfg = self.config.clone();
             let h = self.js.spawn(async move {
                 trace!(port = ?port, "external listener start");
-                let mut h = super::TunnelSupervisor::new(port, mtu, token, to_tunnels, to_client);
+                let mut h =
+                    super::TunnelSupervisor::new(cfg, port, mtu, token, to_tunnels, to_client);
                 if let Err(e) = h.run().await {
                     error!(cause = ?e, port = port, "tunnel creation error");
                 }
@@ -191,6 +193,7 @@ where
             // XXX You MUST NOT return in this loop
             tokio::select! {
                 _maybe_interval = heartbeat_interval.tick() => {
+                    info!("Channel backpressure: from_tunnels: {}/{}", self.from_tunnels.len(), self.config.channel_limits.core);
                     if last_recv_heartbeat.elapsed() > 2*self.config.timeouts.heartbeat_interval {
                         error!("Missing heartbeat from client. Killing connection");
                         break Err(stnet::Error::ConnectionDead.into());

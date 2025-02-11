@@ -77,6 +77,7 @@ impl Error {
         match self {
             Io { source, .. } => {
                 use futures::io::ErrorKind::*;
+                #[allow(clippy::match_like_matches_macro)]
                 match source.kind() {
                     ConnectionReset | NetworkUnreachable | ConnectionAborted | NetworkDown
                     | BrokenPipe => true,
@@ -85,6 +86,7 @@ impl Error {
             }
             QuinnConnection { source, .. } => {
                 use quinn::ConnectionError::*;
+                #[allow(clippy::match_like_matches_macro)]
                 match source {
                     Reset | TimedOut => true,
                     _ => false,
