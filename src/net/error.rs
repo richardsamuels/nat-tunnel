@@ -81,6 +81,15 @@ impl Error {
                 match source.kind() {
                     ConnectionReset | NetworkUnreachable | ConnectionAborted | NetworkDown
                     | BrokenPipe => true,
+                    Other => {
+                        if let Some(e) = source.get_ref() {
+                            if let Some(e) = e.downcast_ref::<quinn::ConnectionError>() {
+                                use quinn::ConnectionError::*;
+                                return matches!(e, Reset | TimedOut);
+                            }
+                        }
+                        false
+                    }
                     _ => false,
                 }
             }
