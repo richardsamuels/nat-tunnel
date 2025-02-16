@@ -48,8 +48,6 @@ where
     }
 
     async fn push_tunnel_config(&mut self) -> Result<()> {
-        self.transport.send_helo(self.config.psk.as_bytes()).await?;
-
         let frame = self.transport.read_frame().await?;
         let stnet::Frame::Auth(_) = frame else {
             return Err(stnet::Error::ConnectionRefused);
@@ -118,6 +116,7 @@ where
 
     #[tracing::instrument(name = "Client", level = "debug", skip_all)]
     pub async fn run(&mut self) -> stnet::Result<()> {
+        self.transport.send_helo(self.config.psk.as_bytes()).await?;
         self.push_tunnel_config().await?;
         let ret = loop {
             tokio::select! {

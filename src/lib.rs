@@ -1,6 +1,6 @@
 pub mod client;
 pub mod config;
-pub mod error;
+mod error;
 pub mod net;
 pub mod race;
 pub mod redirector;
