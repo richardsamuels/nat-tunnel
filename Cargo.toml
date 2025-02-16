@@ -1,5 +1,5 @@
 [package]
-name = "simple-tunnel"
+name = "nat-tunnel"
 version = "0.1.0"
 edition = "2021"
 

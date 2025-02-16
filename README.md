@@ -1,4 +1,4 @@
-# simple-tunnel
+# nat-tunnel
 
 A toy/educational project to allow access to internal TCP network services without
 opening NAT ports or using a VPN. Similar to Cloudflare Access or [frp](https://github.com/fatedier/frp)
@@ -33,6 +33,7 @@ to both config files
 psk = "abcd"
 # the FQDN/IP of the Server and its port
 addr = "127.0.0.1:12345"
+# protocol = "quic" # Protocol subject to change w/o notice. Quic support is default and experimental
 
 [crypto]
 ca = "ca.pem"
@@ -56,6 +57,7 @@ local_port = 8000
 psk = "abcd"
 # the address/port the Server should listen on
 addr = "0.0.0.0:12345"
+# protocol = "quic" # Must be same as client
 
 [crypto]
 key = "key.pem"

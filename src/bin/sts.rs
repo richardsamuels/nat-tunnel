@@ -1,6 +1,6 @@
 use clap::Parser;
 use color_eyre::eyre::{Report, Result as CEResult};
-use simple_tunnel::{config::server as config, net::IoSnafu, server};
+use nat_tunnel::{config::server as config, net::IoSnafu, server};
 use snafu::ResultExt;
 use std::process::exit;
 use tokio::net as tnet;
@@ -30,7 +30,7 @@ async fn main() -> CEResult<()> {
     if c.crypto.is_none() && !args.allow_insecure_transport {
         panic!("Insecure transport in use without --allow-insecure-transport");
     }
-    if c.crypto.is_none() && matches!(c.transport, simple_tunnel::config::Transport::Quic) {
+    if c.crypto.is_none() && matches!(c.transport, nat_tunnel::config::Transport::Quic) {
         panic!("QUIC is enabled, but TLS cert/key file were not provided. Try setting `transport = \"tcp\"` or providing cert/key file");
     }
 
@@ -51,7 +51,7 @@ async fn main() -> CEResult<()> {
     });
 
     // TODO wow lazy
-    use simple_tunnel::config::Transport;
+    use nat_tunnel::config::Transport;
     match c.transport {
         Transport::Tcp => {
             let listener = tnet::TcpListener::bind(c.addr)

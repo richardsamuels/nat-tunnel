@@ -1,8 +1,8 @@
 use clap::Parser;
 use color_eyre::eyre::Report;
-use simple_tunnel::net::Error;
-use simple_tunnel::net::IoSnafu;
-use simple_tunnel::{client, config::client as config, net as stnet};
+use nat_tunnel::net::Error;
+use nat_tunnel::net::IoSnafu;
+use nat_tunnel::{client, config::client as config, net as stnet};
 use snafu::ResultExt;
 use std::process::exit;
 use std::sync::Arc;
@@ -34,11 +34,11 @@ async fn main() -> color_eyre::Result<()> {
     if c.crypto.is_none() && !args.allow_insecure_transport {
         panic!("Insecure transport in use without --allow-insecure-transport");
     }
-    if c.crypto.is_none() && matches!(c.transport, simple_tunnel::config::Transport::Quic) {
+    if c.crypto.is_none() && matches!(c.transport, nat_tunnel::config::Transport::Quic) {
         panic!("QUIC is enabled, but TLS cert/key file were not provided. Try setting `transport = \"tcp\"` or providing cert/key file");
     }
     let crypto_cfg = c.crypto.as_ref().map(|c| {
-        simple_tunnel::tls_self_signed::crypto_client_init(c).expect("failed to load cert files")
+        nat_tunnel::tls_self_signed::crypto_client_init(c).expect("failed to load cert files")
     });
 
     let token = CancellationToken::new();
@@ -61,7 +61,7 @@ async fn main() -> color_eyre::Result<()> {
     });
 
     loop {
-        use simple_tunnel::config::Transport;
+        use nat_tunnel::config::Transport;
         let ft = match c.transport {
             Transport::Quic => run_quic(c.clone(), token.clone()).await,
             Transport::Tcp => run(c.clone(), token.clone(), &crypto_cfg).await,
@@ -110,7 +110,7 @@ fn why_do_i_have_to_impl_this(addr: &str) -> &str {
     }
 }
 
-async fn run_quic(c: config::Config, token: CancellationToken) -> simple_tunnel::net::Result<()> {
+async fn run_quic(c: config::Config, token: CancellationToken) -> nat_tunnel::net::Result<()> {
     use quinn_proto::crypto::rustls::QuicClientConfig;
     use std::net::ToSocketAddrs;
 
@@ -119,7 +119,7 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> simple_tunnel:
     let mut tc = quinn::TransportConfig::default();
     tc.max_idle_timeout(Some(c.timeouts.quic.try_into().unwrap()));
 
-    let crypto_cfg = simple_tunnel::tls_self_signed::crypto_client_init(
+    let crypto_cfg = nat_tunnel::tls_self_signed::crypto_client_init(
         &c.crypto.clone().expect("crypto is None"),
     )?;
     let qcc = QuicClientConfig::try_from(crypto_cfg).expect("invalid crypto config");
@@ -140,7 +140,7 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> simple_tunnel:
         .collect();
     let expected_host = why_do_i_have_to_impl_this(&c.addr);
 
-    let conn = simple_tunnel::race::quinn(token.clone(), &endpoint, &addrs, expected_host).await?;
+    let conn = nat_tunnel::race::quinn(token.clone(), &endpoint, &addrs, expected_host).await?;
     if conn.is_none() {
         error!(addrs=?addrs, "failed to connect to any resolved addresses");
         return Err(Error::ConnectionDead);
@@ -154,7 +154,7 @@ async fn run_quic(c: config::Config, token: CancellationToken) -> simple_tunnel:
         send.id(),
         recv.id(),
     );
-    let b = simple_tunnel::server::QuicBox::new(send, recv);
+    let b = nat_tunnel::server::QuicBox::new(send, recv);
     info!("TLS enabled. All connections to the Server will be encrypted.");
     let mut client = client::Client::new(c, token, id, b);
     client.run().await
@@ -164,7 +164,7 @@ async fn run(
     c: config::Config,
     token: CancellationToken,
     crypto_cfg: &Option<Arc<rustls::ClientConfig>>,
-) -> simple_tunnel::net::Result<()> {
+) -> nat_tunnel::net::Result<()> {
     info!("Handshaking with {}", &c.addr);
     let client_stream = tokio::select! {
         result = tnet::TcpStream::connect(&c.addr) => {
@@ -173,7 +173,7 @@ async fn run(
             })?
         }
         _ = token.cancelled() => {
-            return Err(simple_tunnel::net::IoTimeoutSnafu {
+            return Err(nat_tunnel::net::IoTimeoutSnafu {
                 context: "connection attempt cancelled",
             }.build());
         }
@@ -181,7 +181,7 @@ async fn run(
     let client_stream = client_stream
         .into_std()
         .expect("failed to get std TcpStream");
-    simple_tunnel::net::set_keepalive(&client_stream)
+    nat_tunnel::net::set_keepalive(&client_stream)
         .expect("keepalive should be enabled on stream, but operation failed");
     let client_stream = tnet::TcpStream::from_std(client_stream).with_context(|_| IoSnafu {
         message: "failed to convert stream to async",

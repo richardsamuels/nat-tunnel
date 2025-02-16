@@ -1362,6 +1362,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "nat-tunnel"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "clap",
+ "color-eyre",
+ "futures",
+ "httptest",
+ "itertools 0.14.0",
+ "libc",
+ "portpicker",
+ "quinn",
+ "quinn-proto",
+ "reqwest",
+ "rmp",
+ "rmp-serde",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-platform-verifier 0.5.0",
+ "serde",
+ "serde_bytes",
+ "snafu",
+ "socket2",
+ "test_bin",
+ "tokio",
+ "tokio-rustls",
+ "tokio-serde",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots",
+ "x509-parser",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2172,42 +2208,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9e9e0b4211b72e7b8b6e85c807d36c212bdb33ea8587f7569562a84df5465b1"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "simple-tunnel"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "clap",
- "color-eyre",
- "futures",
- "httptest",
- "itertools 0.14.0",
- "libc",
- "portpicker",
- "quinn",
- "quinn-proto",
- "reqwest",
- "rmp",
- "rmp-serde",
- "rustls",
- "rustls-pki-types",
- "rustls-platform-verifier 0.5.0",
- "serde",
- "serde_bytes",
- "snafu",
- "socket2",
- "test_bin",
- "tokio",
- "tokio-rustls",
- "tokio-serde",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "webpki-roots",
- "x509-parser",
 ]
 
 [[package]]
