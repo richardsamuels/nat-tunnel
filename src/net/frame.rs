@@ -118,6 +118,6 @@ fn set_tcp_user_timeout(socket2: &socket2::Socket) -> std::io::Result<()> {
     let keepintvl = socket2.keepalive_interval()?;
     let keepidle = socket2.keepalive_time()?;
     let keepcnt = socket2.keepalive_retries()?;
-    socket2.set_tcp_user_timeout(Some(keepidle + keepintvl * keepcnt))?;
+    //socket2.set_tcp_user_timeout(Some(keepidle + keepintvl * keepcnt))?;
     Ok(())
 }

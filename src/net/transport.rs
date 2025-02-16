@@ -1,4 +1,3 @@
-use crate::net as stnet;
 use crate::net::error::*;
 use crate::net::frame::*;
 use futures::{SinkExt, TryStreamExt};
@@ -28,6 +27,7 @@ where
 
 pub trait Stream: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Sync + Send + Unpin {}
 impl<T: tokio::io::AsyncWriteExt + tokio::io::AsyncReadExt + Sync + Send + Unpin> Stream for T {}
+
 #[derive(Debug, Hash, Clone)]
 pub enum StreamId {
     Basic(SocketAddr),
@@ -79,10 +79,8 @@ where
                 .build());
             }
             Ok(Err(e)) => {
-                return Err(stnet::Error::Io {
-                    message: "failed to read helo".to_string(),
-                    source: e,
-                    backtrace: snafu::Backtrace::capture(),
+                return Err(e).with_context(|_| IoSnafu {
+                    message: "failed to read helo",
                 })
             }
             Ok(Ok(_)) => (),
@@ -117,10 +115,8 @@ where
                 .build());
             }
             Ok(Err(e)) => {
-                return Err(stnet::Error::Io {
-                    message: "failed to read helo".to_string(),
-                    source: e,
-                    backtrace: snafu::Backtrace::capture(),
+                return Err(e).with_context(|_| IoSnafu {
+                    message: "failed to read helo",
                 })
             }
             Ok(Ok(_)) => (),
@@ -155,10 +151,8 @@ where
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
                     return Err(Error::ConnectionDead);
                 }
-                Err(stnet::Error::Io {
-                    message: "failed to read frame".to_string(),
-                    source: e,
-                    backtrace: snafu::Backtrace::capture(),
+                Err(e).with_context(|_| IoSnafu {
+                    message: "failed to read frame",
                 })
             }
             Ok(None) => Err(Error::ConnectionDead),
@@ -167,31 +161,32 @@ where
     }
 
     pub async fn write_frame(&mut self, t: Frame) -> Result<()> {
-        let future = tokio::time::timeout(self.timeouts.write, self.framed.send(t)).await;
+        self.framed.send(t).await.with_context(|_| IoSnafu {
+            message: "failed to write frame",
+        })?;
+        //let future = tokio::time::timeout(self.timeouts.write, self.framed.send(t)).await;
 
-        match future {
-            Err(_) => {
-                return Err(crate::net::IoTimeoutSnafu {
-                    context: "frame write",
-                }
-                .build());
-            }
-            Ok(Err(e)) => {
-                return Err(stnet::Error::Io {
-                    message: "failed to write frame".to_string(),
-                    source: e,
-                    backtrace: snafu::Backtrace::capture(),
-                })
-            }
-            Ok(Ok(_)) => (),
-        };
+        //match future {
+        //    Err(_) => {
+        //        return Err(crate::net::IoTimeoutSnafu {
+        //            context: "frame write",
+        //        }
+        //        .build());
+        //    }
+        //    Ok(Err(e)) => {
+        //        return Err(stnet::Error::Io {
+        //            message: "failed to write frame".to_string(),
+        //            source: e,
+        //            backtrace: snafu::Backtrace::capture(),
+        //        })
+        //    }
+        //    Ok(Ok(_)) => (),
+        //};
 
         // XXX Flush MUST be called here. See tokio_rustls docs:
         // https://docs.rs/tokio-rustls/latest/tokio_rustls/index.html#why-do-i-need-to-call-poll_flush
-        self.framed.flush().await.map_err(|e| stnet::Error::Io {
-            message: "failed to flush".to_string(),
-            source: e,
-            backtrace: snafu::Backtrace::capture(),
+        self.framed.flush().await.with_context(|_| IoSnafu {
+            message: "failed to flush",
         })
     }
 }

@@ -211,12 +211,8 @@ where
                         None => break Ok(()),
                         Some(data) => data,
                     };
-                    match tokio::time::timeout(
-                        self.config.timeouts.write,
-                        self.transport.write_frame(rframe.into())
-                    ).await {
-                        Ok(Ok(_)) => (),
-                        Ok(Err(e)) => break Err(e.into()),
+                    match self.transport.write_frame(rframe.into()).await {
+                        Ok(_) => (),
                         Err(_) => {
                             error!("Write operation timed out");
                             break Err(stnet::Error::ConnectionDead.into());
