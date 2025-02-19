@@ -87,7 +87,13 @@ impl TcpServer {
             };
 
             if let Some(tls) = &self.tls {
-                let peer_addr = socket.peer_addr().expect("ip");
+                let peer_addr = match socket.peer_addr() {
+                    Err(e) => {
+                        error!(e=?e, "failed to get peer_addr");
+                        continue;
+                    }
+                    Ok(s) => s,
+                };
                 let socket = match tls.accept(socket).await {
                     Err(e) => {
                         error!(cause = ?e, addr = ?addr, "client connection dropped (failed to negotiate TLS)");
