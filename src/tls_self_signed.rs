@@ -57,14 +57,8 @@ impl ServerCertVerifier for SelfSignedPkiVerifier {
                 rustls::CertificateError::Expired,
             ));
         }
+        // TODO; certificate is parsed twice. Avoid that
         let cert = ParsedCertificate::try_from(end_entity)?;
-        //self.verifier.verify_server_cert(
-        //    end_entity,
-        //    intermediates,
-        //    server_name,
-        //    ocsp_response,
-        //    now,
-        //)?;
 
         if !ocsp_response.is_empty() {
             trace!("Unvalidated OCSP response: {:?}", ocsp_response.to_vec());
